@@ -1,19 +1,31 @@
-import EventEmitter from "eventemitter3";
+import { Buffer } from "buffer";
 import {
-  Signer,
-  PublicKey,
-  SystemProgram,
-  TransactionInstruction,
+  Account,
+  Address as KitAddress,
   Commitment,
-  GetProgramAccountsFilter,
-  AccountInfo,
-  RpcResponseAndContext,
-  Context,
-} from "@solana/web3.js";
+  createDecoder,
+  DataPublisher,
+  decodeAccount,
+  Decoder,
+  FetchAccountConfig,
+  FetchAccountsConfig,
+  getDataPublisherFromEventEmitter,
+  GetProgramAccountsDatasizeFilter,
+  GetProgramAccountsMemcmpFilter,
+  Instruction,
+  MaybeAccount,
+  parseBase64RpcAccount,
+  ReadonlyUint8Array,
+  Slot,
+  TransactionSigner,
+  TypedEventTarget,
+} from "@solana/kit";
+import { getCreateAccountInstruction } from "@solana-program/system";
+import { PublicKey } from "@solana/web3.js";
 import Provider, { getProvider } from "../../provider.js";
 import { Idl, IdlAccount } from "../../idl.js";
 import { Coder, BorshCoder } from "../../coder/index.js";
-import { Subscription, Address, translateAddress } from "../common.js";
+import { Address, toAddress } from "../common.js";
 import { AllAccountsMap, IdlAccounts } from "./types.js";
 import * as rpcUtil from "../../utils/rpc.js";
 
@@ -57,6 +69,7 @@ type NullableIdlAccount<IDL extends Idl> = IDL["accounts"] extends undefined
  *
  * ```javascript
  * const counter = await program.account.counter.fetch(address);
+ * console.log(counter.data.count);
  * ```
  *
  * For the full API, see the [[AccountClient]] reference.
@@ -65,11 +78,32 @@ export type AccountNamespace<I extends Idl = Idl> = {
   [A in keyof AllAccountsMap<I>]: AccountClient<I, A>;
 };
 
+/**
+ * A filter narrowing the accounts returned by {@link AccountClient.all}: raw
+ * bytes to match right after the discriminator, or a list of Kit
+ * `getProgramAccounts` filters appended to the discriminator filter.
+ */
+export type AccountFilters =
+  | ReadonlyUint8Array
+  | readonly (
+      | GetProgramAccountsMemcmpFilter
+      | GetProgramAccountsDatasizeFilter
+    )[];
+
+/**
+ * The events published by an account subscription: `change` with the latest
+ * decoded account, and `error` when the subscription fails.
+ */
+export type AccountSubscriptionEvents<T extends object> = {
+  change: Account<T>;
+  error: unknown;
+};
+
 export class AccountClient<
   IDL extends Idl = Idl,
   A extends keyof IdlAccounts<IDL> = keyof IdlAccounts<IDL>,
   N extends NullableIdlAccount<IDL> = NullableIdlAccount<IDL>,
-  T = IdlAccounts<IDL>[A] extends Record<string, unknown>
+  T extends object = IdlAccounts<IDL>[A] extends Record<string, unknown>
     ? IdlAccounts<IDL>[A]
     : never
 > {
@@ -106,6 +140,8 @@ export class AccountClient<
   private _coder: Coder;
 
   private _idlAccount: N;
+  private _programAddress: KitAddress;
+  private _decoder: Decoder<T>;
 
   constructor(
     idl: IDL,
@@ -116,282 +152,255 @@ export class AccountClient<
   ) {
     this._idlAccount = idlAccount;
     this._programId = programId;
+    this._programAddress = toAddress(programId);
     this._provider = provider ?? getProvider();
     this._coder = coder ?? new BorshCoder(idl);
     this._size = this._coder.accounts.size(idlAccount.name);
+    this._decoder = createDecoder({
+      read: (bytes, offset) => [
+        this._coder.accounts.decode<T>(
+          idlAccount.name,
+          Buffer.from(bytes.subarray(offset))
+        ),
+        bytes.length,
+      ],
+    });
   }
 
   /**
-   * Returns a deserialized account, returning null if it doesn't exist.
+   * Returns the account at the given address, whether it exists or not.
    *
    * @param address The address of the account to fetch.
    */
   async fetchNullable(
     address: Address,
-    commitment?: Commitment
-  ): Promise<T | null> {
-    const { data } = await this.fetchNullableAndContext(address, commitment);
-    return data;
+    config?: FetchAccountConfig
+  ): Promise<MaybeAccount<T>> {
+    const { account } = await this.fetchNullableAndContext(address, config);
+    return account;
   }
 
   /**
-   * Returns a deserialized account along with the associated rpc response context, returning null if it doesn't exist.
+   * Returns the account at the given address, whether it exists or not,
+   * along with the slot it was read at.
    *
    * @param address The address of the account to fetch.
    */
   async fetchNullableAndContext(
     address: Address,
-    commitment?: Commitment
-  ): Promise<{ data: T | null; context: Context }> {
-    const accountInfo = await this.getAccountInfoAndContext(
-      address,
-      commitment
-    );
-    const { value, context } = accountInfo;
+    config: FetchAccountConfig = {}
+  ): Promise<{ account: MaybeAccount<T>; context: { slot: Slot } }> {
+    const kitAddress = toAddress(address);
+    const { abortSignal, ...rpcConfig } = config;
+    const { value, context } = await this._provider.rpc
+      .getAccountInfo(kitAddress, { ...rpcConfig, encoding: "base64" })
+      .send({ abortSignal });
     return {
-      data:
-        value && value.data.length !== 0
-          ? this._coder.accounts.decode<T>(this._idlAccount.name, value.data)
-          : null,
+      account: decodeAccount(
+        parseBase64RpcAccount(kitAddress, value),
+        this._decoder
+      ),
       context,
     };
   }
 
   /**
-   * Returns a deserialized account.
+   * Returns the account at the given address, throwing if it does not exist.
    *
    * @param address The address of the account to fetch.
    */
-  async fetch(address: Address, commitment?: Commitment): Promise<T> {
-    const { data } = await this.fetchNullableAndContext(address, commitment);
-    if (data === null) {
-      throw new Error(
-        `Account does not exist or has no data ${address.toString()}`
-      );
-    }
-    return data;
+  async fetch(
+    address: Address,
+    config?: FetchAccountConfig
+  ): Promise<Account<T>> {
+    const { account } = await this.fetchAndContext(address, config);
+    return account;
   }
 
   /**
-   * Returns a deserialized account along with the associated rpc response context.
+   * Returns the account at the given address along with the slot it was read
+   * at, throwing if it does not exist.
    *
    * @param address The address of the account to fetch.
    */
   async fetchAndContext(
     address: Address,
-    commitment?: Commitment
-  ): Promise<{ data: T | null; context: Context }> {
-    const { data, context } = await this.fetchNullableAndContext(
+    config?: FetchAccountConfig
+  ): Promise<{ account: Account<T>; context: { slot: Slot } }> {
+    const { account, context } = await this.fetchNullableAndContext(
       address,
-      commitment
+      config
     );
-    if (data === null) {
-      throw new Error(`Account does not exist ${address.toString()}`);
+    if (!account.exists) {
+      throw new Error(`Account does not exist ${account.address}`);
     }
-    return { data, context };
+    return { account, context };
   }
 
   /**
-   * Returns multiple deserialized accounts.
-   * Accounts not found or with wrong discriminator are returned as null.
+   * Returns the accounts at the given addresses, whether they exist or not.
+   * Accounts that exist but hold data of another type fail to decode.
    *
    * @param addresses The addresses of the accounts to fetch.
    */
   async fetchMultiple(
     addresses: Address[],
-    commitment?: Commitment
-  ): Promise<(T | null)[]> {
-    const accounts = await this.fetchMultipleAndContext(addresses, commitment);
-    return accounts.map((account) => (account ? account.data : null));
+    config?: FetchAccountsConfig
+  ): Promise<MaybeAccount<T>[]> {
+    const batches = await this.fetchMultipleAndContext(addresses, config);
+    return batches.flatMap((batch) => batch.accounts);
   }
 
   /**
-   * Returns multiple deserialized accounts.
-   * Accounts not found or with wrong discriminator are returned as null.
+   * Returns the accounts at the given addresses, whether they exist or not,
+   * in batches of at most 100 (the RPC limit) each read at a single slot.
    *
    * @param addresses The addresses of the accounts to fetch.
    */
   async fetchMultipleAndContext(
     addresses: Address[],
-    commitment?: Commitment
-  ): Promise<({ data: T; context: Context } | null)[]> {
-    const accounts = await rpcUtil.getMultipleAccountsAndContext(
-      this._provider.connection,
-      addresses.map((address) => translateAddress(address)),
-      commitment
+    config?: FetchAccountsConfig
+  ): Promise<{ accounts: MaybeAccount<T>[]; context: { slot: Slot } }[]> {
+    const batches = await rpcUtil.getMultipleAccountsAndContext(
+      this._provider.rpc,
+      addresses.map(toAddress),
+      config
     );
-
-    // Decode accounts where discriminator is correct, null otherwise
-    return accounts.map((result) => {
-      if (result == null) {
-        return null;
-      }
-      const { account, context } = result;
-      return {
-        data: this._coder.accounts.decode(this._idlAccount.name, account.data),
-        context,
-      };
-    });
+    return batches.map(({ accounts, context }) => ({
+      accounts: accounts.map((account) =>
+        decodeAccount(account, this._decoder)
+      ),
+      context,
+    }));
   }
 
   /**
    * Returns all instances of this account type for the program.
    *
-   * @param filters User-provided filters to narrow the results from `connection.getProgramAccounts`.
-   *
-   *                When filters are not defined this method returns all
-   *                the account instances.
-   *
-   *                When filters are of type `Buffer`, the filters are appended
-   *                after the discriminator.
-   *
-   *                When filters are of type `GetProgramAccountsFilter[]`,
-   *                filters are appended after the discriminator filter.
+   * @param filters Narrows the results: bytes to match right after the
+   *                discriminator, or Kit `getProgramAccounts` filters
+   *                appended to the discriminator filter. Unset returns
+   *                every instance.
    */
   async all(
-    filters?: Buffer | GetProgramAccountsFilter[]
-  ): Promise<ProgramAccount<T>[]> {
-    const filter: { offset?: number; bytes?: string; dataSize?: number } =
-      this.coder.accounts.memcmp(
+    filters?: AccountFilters,
+    config: FetchAccountConfig = {}
+  ): Promise<Account<T>[]> {
+    const memcmp: { offset: number; bytes: string } =
+      this._coder.accounts.memcmp(
         this._idlAccount.name,
-        filters instanceof Buffer ? filters : undefined
+        filters && !Array.isArray(filters)
+          ? Buffer.from(filters as ReadonlyUint8Array)
+          : undefined
       );
-    const coderFilters: GetProgramAccountsFilter[] = [];
-    if (filter?.offset != undefined && filter?.bytes != undefined) {
-      coderFilters.push({
-        memcmp: { offset: filter.offset, bytes: filter.bytes },
-      });
-    }
-    if (filter?.dataSize != undefined) {
-      coderFilters.push({ dataSize: filter.dataSize });
-    }
-    let resp = await this._provider.connection.getProgramAccounts(
-      this._programId,
-      {
-        commitment: this._provider.connection.commitment,
-        filters: [...coderFilters, ...(Array.isArray(filters) ? filters : [])],
-      }
-    );
+    const { abortSignal, ...rpcConfig } = config;
+    const accounts = await this._provider.rpc
+      .getProgramAccounts(this._programAddress, {
+        ...rpcConfig,
+        encoding: "base64",
+        filters: [
+          {
+            memcmp: {
+              offset: BigInt(memcmp.offset),
+              bytes:
+                memcmp.bytes as GetProgramAccountsMemcmpFilter["memcmp"]["bytes"],
+              encoding: "base58",
+            },
+          },
+          ...(Array.isArray(filters) ? filters : []),
+        ],
+      })
+      .send({ abortSignal });
 
-    return resp.map(({ pubkey, account }) => {
-      return {
-        publicKey: pubkey,
-        account: this._coder.accounts.decode(
-          this._idlAccount.name,
-          account.data
-        ),
-      };
-    });
+    return accounts.map(({ pubkey, account }) =>
+      decodeAccount(parseBase64RpcAccount(pubkey, account), this._decoder)
+    );
   }
 
   /**
-   * Returns an `EventEmitter` emitting a "change" event whenever the account
-   * changes.
+   * Subscribes to changes of the account at the given address, publishing
+   * each new state on the `change` channel and failures on `error`.
+   *
+   * ```typescript
+   * const controller = new AbortController();
+   * program.account.counter
+   *   .subscribe(address, { abortSignal: controller.signal })
+   *   .on("change", (counter) => console.log(counter.data.count));
+   * // Later, to stop listening:
+   * controller.abort();
+   * ```
+   *
+   * Turn the subscription into an async iterable with Kit's
+   * `createAsyncIterableFromDataPublisher` if preferred.
    */
-  subscribe(address: Address, commitment?: Commitment): EventEmitter {
-    const sub = subscriptions.get(address.toString());
-    if (sub) {
-      return sub.ee;
+  subscribe(
+    address: Address,
+    config: { commitment?: Commitment; abortSignal?: AbortSignal } = {}
+  ): DataPublisher<AccountSubscriptionEvents<T>> {
+    const { rpcSubscriptions } = this._provider;
+    if (!rpcSubscriptions) {
+      throw new Error(
+        "Subscribing to accounts requires the provider to have an " +
+          "`rpcSubscriptions` client."
+      );
     }
+    const kitAddress = toAddress(address);
+    const abortSignal = config.abortSignal ?? new AbortController().signal;
+    const target = new EventTarget() as TypedEventTarget<{
+      change: CustomEvent<Account<T>>;
+      error: CustomEvent<unknown>;
+    }>;
 
-    const ee = new EventEmitter();
-    address = translateAddress(address);
-    const listener = this._provider.connection.onAccountChange(
-      address,
-      (acc) => {
-        const account = this._coder.accounts.decode(
-          this._idlAccount.name,
-          acc.data
-        );
-        ee.emit("change", account);
-      },
-      commitment
-    );
-
-    subscriptions.set(address.toString(), {
-      ee,
-      listener,
-    });
-
-    return ee;
-  }
-
-  /**
-   * Unsubscribes from the account at the given address.
-   */
-  async unsubscribe(address: Address) {
-    let sub = subscriptions.get(address.toString());
-    if (!sub) {
-      console.warn("Address is not subscribed");
-      return;
-    }
-    if (subscriptions) {
-      await this._provider.connection
-        .removeAccountChangeListener(sub.listener)
-        .then(() => {
-          subscriptions.delete(address.toString());
+    (async () => {
+      const notifications = await rpcSubscriptions
+        .accountNotifications(kitAddress, {
+          commitment: config.commitment,
+          encoding: "base64",
         })
-        .catch(console.error);
-    }
+        .subscribe({ abortSignal });
+      for await (const { value } of notifications) {
+        const account = decodeAccount(
+          parseBase64RpcAccount(kitAddress, value),
+          this._decoder
+        );
+        target.dispatchEvent(new CustomEvent("change", { detail: account }));
+      }
+    })().catch((error) => {
+      if (!abortSignal.aborted) {
+        target.dispatchEvent(new CustomEvent("error", { detail: error }));
+      }
+    });
+
+    return getDataPublisherFromEventEmitter(target);
   }
 
   /**
-   * Returns an instruction for creating this account.
+   * Returns an instruction creating an account of this type, paid for by the
+   * provider's wallet and owned by the program.
+   *
+   * @param newAccount   The signer of the account to create.
+   * @param sizeOverride The account size, defaulting to this type's size.
    */
   async createInstruction(
-    signer: Signer,
+    newAccount: TransactionSigner,
     sizeOverride?: number
-  ): Promise<TransactionInstruction> {
-    const size = this.size;
-
-    if (this._provider.publicKey === undefined) {
+  ): Promise<Instruction> {
+    const { wallet } = this._provider;
+    if (!wallet) {
       throw new Error(
-        "This function requires the Provider interface implementor to have a 'publicKey' field."
+        "Creating accounts requires the provider to have a `wallet`."
       );
     }
-
-    return SystemProgram.createAccount({
-      fromPubkey: this._provider.publicKey,
-      newAccountPubkey: signer.publicKey,
-      space: sizeOverride ?? size,
-      lamports:
-        await this._provider.connection.getMinimumBalanceForRentExemption(
-          sizeOverride ?? size
-        ),
-      programId: this._programId,
+    const space = BigInt(sizeOverride ?? this.size);
+    const lamports = await this._provider.rpc
+      .getMinimumBalanceForRentExemption(space)
+      .send();
+    return getCreateAccountInstruction({
+      payer: wallet,
+      newAccount,
+      lamports,
+      space,
+      programAddress: this._programAddress,
     });
   }
-
-  async getAccountInfo(
-    address: Address,
-    commitment?: Commitment
-  ): Promise<AccountInfo<Buffer> | null> {
-    return await this._provider.connection.getAccountInfo(
-      translateAddress(address),
-      commitment
-    );
-  }
-
-  async getAccountInfoAndContext(
-    address: Address,
-    commitment?: Commitment
-  ): Promise<RpcResponseAndContext<AccountInfo<Buffer> | null>> {
-    return await this._provider.connection.getAccountInfoAndContext(
-      translateAddress(address),
-      commitment
-    );
-  }
 }
-
-/**
- * @hidden
- *
- * Deserialized account owned by a program.
- */
-export type ProgramAccount<T = any> = {
-  publicKey: PublicKey;
-  account: T;
-};
-
-// Tracks all subscriptions.
-const subscriptions: Map<string, Subscription> = new Map();
