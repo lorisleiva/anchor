@@ -110,6 +110,12 @@ export default interface Provider {
   readonly connection: Connection;
   /** @deprecated Use `wallet.address` instead. */
   readonly publicKey?: PublicKey;
+  /**
+   * Default options for sending transactions. Reads default to its
+   * `commitment` too, so that an account written at a given commitment can
+   * be read straight back at the same one.
+   */
+  readonly opts?: ConfirmOptions;
 
   sendAndConfirm?(
     message: TransactionMessage,
@@ -193,10 +199,14 @@ export class AnchorProvider implements Provider {
     return this.#connection;
   }
 
+  /**
+   * The default confirmation options: `confirmed` for both sending and
+   * preflight, matching Kit's own client default.
+   */
   static defaultOptions(): ConfirmOptions {
     return {
-      preflightCommitment: "processed",
-      commitment: "processed",
+      preflightCommitment: "confirmed",
+      commitment: "confirmed",
     };
   }
 
@@ -263,7 +273,7 @@ export class AnchorProvider implements Provider {
     if (opts === undefined) {
       opts = this.opts;
     }
-    const commitment = opts.commitment ?? "processed";
+    const commitment = opts.commitment ?? "confirmed";
     const prepared = this.#prepare(message, signers ?? []);
 
     if (isTransactionMessageWithBlockhashLifetime(prepared.message)) {
@@ -339,7 +349,7 @@ export class AnchorProvider implements Provider {
     if (opts === undefined) {
       opts = this.opts;
     }
-    const commitment = opts.commitment ?? "processed";
+    const commitment = opts.commitment ?? "confirmed";
     let lifetime: BlockhashLifetime | undefined;
 
     const pending: (Transaction & TransactionWithLifetime)[] = [];
@@ -391,7 +401,7 @@ export class AnchorProvider implements Provider {
     commitment?: Commitment,
     includeAccounts?: boolean | Address[]
   ): Promise<SuccessfulTxSimulationResponse> {
-    const kitCommitment = commitment ?? this.opts.commitment ?? "processed";
+    const kitCommitment = commitment ?? this.opts.commitment ?? "confirmed";
     const sigVerify = !!signers && signers.length > 0;
 
     const prepared = this.#prepare(message, signers ?? []);

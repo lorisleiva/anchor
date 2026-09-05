@@ -564,7 +564,8 @@ class AccountStore {
     if (!this._cache.has(address)) {
       const accountInfo = await fetchEncodedAccount(
         this._provider.rpc,
-        toAddress(publicKey)
+        toAddress(publicKey),
+        { commitment: this._provider.opts?.commitment }
       );
       if (!accountInfo.exists) {
         throw new Error(`Account not found: ${address}`);

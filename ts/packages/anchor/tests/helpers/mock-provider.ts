@@ -22,7 +22,12 @@ import {
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
   TransactionSigner,
 } from "@solana/kit";
-import { AnchorProvider, SolanaClient, WalletSigner } from "../../src/provider";
+import {
+  AnchorProvider,
+  ConfirmOptions,
+  SolanaClient,
+  WalletSigner,
+} from "../../src/provider";
 import { createWallet } from "../../src/wallet";
 
 export const BLOCKHASH =
@@ -43,6 +48,8 @@ export function mockProvider(
     wallet?: WalletSigner;
     /** Extra subscription methods, merged over the confirming defaults. */
     subscriptions?: Record<string, unknown>;
+    /** Default confirmation options of the provider. */
+    opts?: ConfirmOptions;
   } = {}
 ) {
   const keypair = Keypair.generate();
@@ -69,7 +76,8 @@ export function mockProvider(
         ...options.subscriptions,
       },
     } as SolanaClient,
-    wallet
+    wallet,
+    options.opts
   );
   return { provider, wallet, requests };
 }
