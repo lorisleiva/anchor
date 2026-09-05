@@ -391,7 +391,8 @@ export class Program<IDL extends Idl = Idl> {
     const programId = translateAddress(programAddress);
     const account = await fetchEncodedAccount(
       provider.rpc,
-      toAddress(idlAddress(programId))
+      toAddress(idlAddress(programId)),
+      { commitment: provider.opts?.commitment }
     );
     if (!account.exists) return null;
 

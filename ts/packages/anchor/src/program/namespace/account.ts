@@ -168,6 +168,19 @@ export class AccountClient<
   }
 
   /**
+   * Applies the provider's default commitment to a read config, so that an
+   * account written at that commitment can be read straight back.
+   */
+  private withDefaults<C extends { commitment?: Commitment }>(
+    config: C = {} as C
+  ): C {
+    return {
+      ...config,
+      commitment: config.commitment ?? this._provider.opts?.commitment,
+    };
+  }
+
+  /**
    * Returns the account at the given address, whether it exists or not.
    *
    * @param address The address of the account to fetch.
@@ -191,7 +204,7 @@ export class AccountClient<
     config: FetchAccountConfig = {}
   ): Promise<{ account: MaybeAccount<T>; context: { slot: Slot } }> {
     const kitAddress = toAddress(address);
-    const { abortSignal, ...rpcConfig } = config;
+    const { abortSignal, ...rpcConfig } = this.withDefaults(config);
     const { value, context } = await this._provider.rpc
       .getAccountInfo(kitAddress, { ...rpcConfig, encoding: "base64" })
       .send({ abortSignal });
@@ -239,7 +252,7 @@ export class AccountClient<
 
   /**
    * Returns the accounts at the given addresses, whether they exist or not.
-   * Accounts that exist but hold data of another type fail to decode.
+   * The call fails if any account holds data of another type.
    *
    * @param addresses The addresses of the accounts to fetch.
    */
@@ -264,7 +277,7 @@ export class AccountClient<
     const batches = await rpcUtil.getMultipleAccountsAndContext(
       this._provider.rpc,
       addresses.map(toAddress),
-      config
+      this.withDefaults(config)
     );
     return batches.map(({ accounts, context }) => ({
       accounts: accounts.map((account) =>
@@ -293,7 +306,7 @@ export class AccountClient<
           ? Buffer.from(filters as ReadonlyUint8Array)
           : undefined
       );
-    const { abortSignal, ...rpcConfig } = config;
+    const { abortSignal, ...rpcConfig } = this.withDefaults(config);
     const accounts = await this._provider.rpc
       .getProgramAccounts(this._programAddress, {
         ...rpcConfig,
@@ -330,8 +343,9 @@ export class AccountClient<
    * controller.abort();
    * ```
    *
-   * Turn the subscription into an async iterable with Kit's
-   * `createAsyncIterableFromDataPublisher` if preferred.
+   * Aborting the signal is the only way to stop listening: without one, the
+   * subscription lives as long as the process. Turn it into an async
+   * iterable with Kit's `createAsyncIterableFromDataPublisher` if preferred.
    */
   subscribe(
     address: Address,
@@ -345,7 +359,8 @@ export class AccountClient<
       );
     }
     const kitAddress = toAddress(address);
-    const abortSignal = config.abortSignal ?? new AbortController().signal;
+    const { abortSignal = new AbortController().signal, commitment } =
+      this.withDefaults(config);
     const target = new EventTarget() as TypedEventTarget<{
       change: CustomEvent<Account<T>>;
       error: CustomEvent<unknown>;
@@ -353,10 +368,7 @@ export class AccountClient<
 
     (async () => {
       const notifications = await rpcSubscriptions
-        .accountNotifications(kitAddress, {
-          commitment: config.commitment,
-          encoding: "base64",
-        })
+        .accountNotifications(kitAddress, { commitment, encoding: "base64" })
         .subscribe({ abortSignal });
       for await (const { value } of notifications) {
         const account = decodeAccount(
