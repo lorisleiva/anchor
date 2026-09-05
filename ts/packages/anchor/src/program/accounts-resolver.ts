@@ -21,6 +21,7 @@ import { AllInstructions } from "./namespace/types.js";
 import Provider from "../provider.js";
 import { AccountsCoder, BorshAccountsCoder } from "../coder/index.js";
 import { decodeTokenAccount } from "./token-account-layout";
+import { withProviderDefaults } from "../utils/common.js";
 import { Address, Program, toAddress, translateAddress } from "./index.js";
 import {
   PartialAccounts,
@@ -565,7 +566,7 @@ class AccountStore {
       const accountInfo = await fetchEncodedAccount(
         this._provider.rpc,
         toAddress(publicKey),
-        { commitment: this._provider.opts?.commitment }
+        withProviderDefaults(this._provider)
       );
       if (!accountInfo.exists) {
         throw new Error(`Account not found: ${address}`);

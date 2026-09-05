@@ -13,6 +13,7 @@ import Provider, { getProvider } from "../provider.js";
 import { CustomAccountResolver } from "./accounts-resolver.js";
 import { Address, toAddress, translateAddress } from "./common.js";
 import { EventManager } from "./event.js";
+import { withProviderDefaults } from "../utils/common.js";
 import NamespaceFactory, {
   AccountNamespace,
   IdlEvents,
@@ -392,7 +393,7 @@ export class Program<IDL extends Idl = Idl> {
     const account = await fetchEncodedAccount(
       provider.rpc,
       toAddress(idlAddress(programId)),
-      { commitment: provider.opts?.commitment }
+      withProviderDefaults(provider)
     );
     if (!account.exists) return null;
 
