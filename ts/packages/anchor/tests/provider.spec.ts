@@ -3,11 +3,15 @@ import {
   addSignersToTransactionMessage,
   Blockhash,
   Nonce,
+  partiallySignTransactionWithSigners,
   setTransactionMessageFeePayer,
+  setTransactionMessageFeePayerSigner,
   setTransactionMessageLifetimeUsingBlockhash,
   setTransactionMessageLifetimeUsingDurableNonce,
   SolanaError,
   SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
+  Transaction,
+  TransactionModifyingSigner,
   TransactionPartialSigner,
   TransactionSigner,
 } from "@solana/kit";
@@ -29,6 +33,17 @@ import {
   SYSTEM_PROGRAM,
   transferMessage,
 } from "./helpers/mock-provider";
+
+/** A key pair wallet whose `signTransactions` calls are recorded. */
+function spiedWallet() {
+  const inner = createWallet(Keypair.generate().secretKey);
+  const signTransactions = jest.fn(inner.signTransactions);
+  const wallet: TransactionPartialSigner = {
+    address: inner.address,
+    signTransactions,
+  };
+  return { wallet, signTransactions };
+}
 
 describe("AnchorProvider", () => {
   describe("construction", () => {
@@ -206,6 +221,26 @@ describe("AnchorProvider", () => {
       expectFullySigned(decodeWireTransaction(request).transaction, 2);
     });
 
+    it("uses a fee payer signer attached to the message", async () => {
+      const { provider, wallet, requests } = mockProvider(
+        confirmingResponders()
+      );
+
+      // The pattern recommended for manual signing: no `signers` argument,
+      // the sponsor is discovered from the message itself.
+      const sponsor = randomSigner();
+      const message = setTransactionMessageFeePayerSigner(
+        sponsor.signer,
+        transferMessage(wallet.address)
+      );
+      await provider.sendAndConfirm(message);
+
+      const request = requests.find((r) => r.method === "sendTransaction")!;
+      const { transaction, message: compiled } = decodeWireTransaction(request);
+      expect(compiled.staticAccounts[0]).toBe(sponsor.address);
+      expectFullySigned(transaction, 2);
+    });
+
     it("skips signers the transaction does not require", async () => {
       const { provider, wallet, requests } = mockProvider(
         confirmingResponders()
@@ -370,13 +405,7 @@ describe("AnchorProvider", () => {
 
   describe("sendAll", () => {
     it("signs the whole batch with the wallet in a single request", async () => {
-      const keypair = Keypair.generate();
-      const inner = createWallet(keypair.secretKey);
-      const signTransactions = jest.fn(inner.signTransactions);
-      const wallet: TransactionPartialSigner = {
-        address: inner.address,
-        signTransactions,
-      };
+      const { wallet, signTransactions } = spiedWallet();
       const { provider, requests } = mockProvider(confirmingResponders(), {
         wallet,
       });
@@ -402,13 +431,7 @@ describe("AnchorProvider", () => {
     });
 
     it("skips the wallet for transactions it does not sign", async () => {
-      const keypair = Keypair.generate();
-      const inner = createWallet(keypair.secretKey);
-      const signTransactions = jest.fn(inner.signTransactions);
-      const wallet: TransactionPartialSigner = {
-        address: inner.address,
-        signTransactions,
-      };
+      const { wallet, signTransactions } = spiedWallet();
       const { provider, requests } = mockProvider(confirmingResponders(), {
         wallet,
       });
@@ -425,6 +448,89 @@ describe("AnchorProvider", () => {
       expect(signTransactions).not.toHaveBeenCalled();
       const sent = requests.find((r) => r.method === "sendTransaction")!;
       expectFullySigned(decodeWireTransaction(sent).transaction, 1);
+    });
+
+    it("merges wallet signatures back into a mixed batch in order", async () => {
+      const { wallet, signTransactions } = spiedWallet();
+      const { provider, requests } = mockProvider(confirmingResponders(), {
+        wallet,
+      });
+
+      // Sponsor-paid, wallet-paid, sponsor-paid: the wallet only signs the
+      // middle one, and every signed transaction must land in its own slot.
+      const sponsor = randomSigner();
+      const sponsored = () => ({
+        message: setTransactionMessageFeePayer(
+          sponsor.address,
+          transferMessage(sponsor.address)
+        ),
+        signers: [sponsor.signer],
+      });
+      const signatures = await provider.sendAll([
+        sponsored(),
+        { message: transferMessage(wallet.address) },
+        sponsored(),
+      ]);
+
+      expect(signTransactions).toHaveBeenCalledTimes(1);
+      expect(signTransactions.mock.calls[0][0]).toHaveLength(1);
+
+      const sent = requests
+        .filter((r) => r.method === "sendTransaction")
+        .map((r) => decodeWireTransaction(r));
+      expect(sent.map((s) => s.message.staticAccounts[0])).toEqual([
+        sponsor.address,
+        wallet.address,
+        sponsor.address,
+      ]);
+      expect(sent.map((s) => signatureBase58(s.transaction))).toEqual(
+        signatures
+      );
+      for (const { transaction } of sent) {
+        expectFullySigned(transaction, 1);
+      }
+    });
+  });
+
+  describe("wallet kinds", () => {
+    it("signs through a modifying wallet", async () => {
+      const inner = createWallet(Keypair.generate().secretKey);
+      const modifyAndSignTransactions = jest.fn(
+        async (transactions: readonly Transaction[]) =>
+          await Promise.all(
+            transactions.map((tx) =>
+              partiallySignTransactionWithSigners([inner], tx)
+            )
+          )
+      );
+      const wallet: TransactionModifyingSigner = {
+        address: inner.address,
+        modifyAndSignTransactions,
+      };
+      const { provider, requests } = mockProvider(confirmingResponders(), {
+        wallet,
+      });
+
+      await provider.sendAndConfirm(transferMessage(wallet.address));
+
+      expect(modifyAndSignTransactions).toHaveBeenCalledTimes(1);
+      const sent = requests.find((r) => r.method === "sendTransaction")!;
+      expectFullySigned(decodeWireTransaction(sent).transaction, 1);
+    });
+
+    it("prefers partial signing for wallets implementing both", async () => {
+      const { wallet: partial, signTransactions } = spiedWallet();
+      const modifyAndSignTransactions = jest.fn();
+      const wallet: TransactionPartialSigner & TransactionModifyingSigner = {
+        ...partial,
+        modifyAndSignTransactions,
+      };
+      const { provider } = mockProvider(confirmingResponders(), { wallet });
+
+      await provider.sendAndConfirm(transferMessage(wallet.address));
+
+      expect(signTransactions).toHaveBeenCalledTimes(1);
+      expect(modifyAndSignTransactions).not.toHaveBeenCalled();
     });
   });
 });

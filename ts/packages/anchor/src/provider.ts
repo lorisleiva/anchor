@@ -541,6 +541,10 @@ export class AnchorProvider implements Provider {
       return tx;
     });
 
+    // Unlike Kit, which favours modifying signers, a wallet implementing
+    // both interfaces signs partially: it signs last, after the other
+    // signers, so modifying the transaction would invalidate their
+    // signatures.
     let signed: readonly (Transaction & TransactionWithLifetime)[];
     if (isTransactionPartialSigner(this.wallet)) {
       const signatureDictionaries = await this.wallet.signTransactions(toSign);
