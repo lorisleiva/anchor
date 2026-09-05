@@ -1,5 +1,7 @@
 import {
   isSolanaError,
+  SolanaError,
+  SolanaErrorCode,
   SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
 } from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
@@ -244,14 +246,12 @@ export class ProgramError extends Error {
   private static parseErrorCode(err: any): number | null {
     // Kit nests the instruction error as a `SolanaError` in the cause chain
     // (e.g. below a preflight failure), carrying the code in its context.
-    for (
-      let cause: unknown = err;
-      cause instanceof Error;
-      cause = cause.cause
-    ) {
-      if (isSolanaError(cause, SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM)) {
-        return Number(cause.context.code);
-      }
+    const customError = findSolanaError(
+      err,
+      SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM
+    );
+    if (customError) {
+      return Number(customError.context.code);
     }
 
     // Fall back to parsing the error string, e.g. for errors surfaced by the
@@ -293,6 +293,22 @@ export class ProgramError extends Error {
   public toString(): string {
     return this.msg;
   }
+}
+
+/**
+ * Finds a Kit `SolanaError` with the given code in the cause chain of the
+ * given error, including the error itself.
+ */
+export function findSolanaError<TCode extends SolanaErrorCode>(
+  err: unknown,
+  code: TCode
+): SolanaError<TCode> | undefined {
+  for (let cause: unknown = err; cause instanceof Error; cause = cause.cause) {
+    if (isSolanaError(cause, code)) {
+      return cause;
+    }
+  }
+  return undefined;
 }
 
 export function translateError(err: any, idlErrors: Map<number, string>) {
