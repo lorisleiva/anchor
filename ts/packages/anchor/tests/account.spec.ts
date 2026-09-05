@@ -158,6 +158,58 @@ describe("AccountClient", () => {
     });
   });
 
+  describe("commitment", () => {
+    it("reads at the provider's default commitment", async () => {
+      const { provider, requests } = mockProvider({
+        getAccountInfo: () => withContext(counterAccount(1n)),
+        getMultipleAccounts: () => withContext([counterAccount(1n)]),
+        getProgramAccounts: () => [],
+      });
+      const program = new Program<CounterIdl>(idl, provider);
+
+      await program.account.counter.fetch(randomAddress());
+      await program.account.counter.fetchMultiple([randomAddress()]);
+      await program.account.counter.all();
+
+      // Kit's own client default, so an account written through the
+      // provider can be read straight back.
+      expect(requests.map((r) => (r.params[1] as any).commitment)).toEqual([
+        "confirmed",
+        "confirmed",
+        "confirmed",
+      ]);
+    });
+
+    it("follows a custom provider commitment and lets callers override it", async () => {
+      const { provider, requests } = mockProvider(
+        {
+          getAccountInfo: () => withContext(counterAccount(1n)),
+          getMultipleAccounts: () => withContext([counterAccount(1n)]),
+          getProgramAccounts: () => [],
+        },
+        { opts: { commitment: "processed" } }
+      );
+      const program = new Program<CounterIdl>(idl, provider);
+
+      await program.account.counter.fetch(randomAddress());
+      await program.account.counter.fetchMultiple([randomAddress()], {
+        commitment: "confirmed",
+      });
+      await program.account.counter.all(undefined, { minContextSlot: 5n });
+
+      expect(
+        requests.map((r) => {
+          const { commitment, minContextSlot } = r.params[1] as any;
+          return [commitment, minContextSlot];
+        })
+      ).toEqual([
+        ["processed", undefined],
+        ["confirmed", undefined],
+        ["processed", 5n],
+      ]);
+    });
+  });
+
   describe("fetchMultiple", () => {
     it("fetches in batches of 100 and keeps the address order", async () => {
       const addresses = Array.from({ length: 150 }, () => randomAddress());
@@ -319,12 +371,14 @@ describe("AccountClient", () => {
     });
 
     it("can be consumed as an async iterable", async () => {
+      const calls: unknown[][] = [];
       const { provider } = mockProvider(
         {},
         {
-          subscriptions: accountNotifications([
-            withContext(counterAccount(9n)),
-          ]),
+          subscriptions: accountNotifications(
+            [withContext(counterAccount(9n))],
+            calls
+          ),
         }
       );
       const program = new Program<CounterIdl>(idl, provider);
@@ -345,6 +399,11 @@ describe("AccountClient", () => {
         expect(account.data.count).toBe(9n);
         controller.abort();
       }
+      // Subscriptions default to the provider commitment too.
+      expect(calls[0][1]).toEqual({
+        commitment: "confirmed",
+        encoding: "base64",
+      });
     });
 
     it("publishes decoding failures on the error channel", async () => {
@@ -420,6 +479,9 @@ describe("Program.fetchIdl", () => {
     expect(result).toBeNull();
     const request = requests.find((r) => r.method === "getAccountInfo")!;
     expect(typeof request.params[0]).toBe("string");
-    expect((request.params[1] as any).encoding).toBe("base64");
+    expect(request.params[1]).toMatchObject({
+      encoding: "base64",
+      commitment: "confirmed",
+    });
   });
 });

@@ -46,9 +46,10 @@ export function mockProvider(
   responders: Record<string, Responder>,
   options: {
     wallet?: WalletSigner;
-    opts?: ConfirmOptions;
     /** Extra subscription methods, merged over the confirming defaults. */
     subscriptions?: Record<string, unknown>;
+    /** Default confirmation options of the provider. */
+    opts?: ConfirmOptions;
   } = {}
 ) {
   const keypair = Keypair.generate();
