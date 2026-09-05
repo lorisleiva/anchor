@@ -9,7 +9,7 @@ import {
   isSolanaError,
   SOLANA_ERROR__ACCOUNTS__FAILED_TO_DECODE_ACCOUNT,
 } from "@solana/kit";
-import { Idl, Program } from "../src";
+import { Idl, Program, Provider } from "../src";
 import {
   mockProvider,
   randomAddress,
@@ -207,6 +207,81 @@ describe("AccountClient", () => {
         ["confirmed", undefined],
         ["processed", 5n],
       ]);
+    });
+  });
+
+  describe("commitment with partial or missing provider options", () => {
+    it("completes partial provider options with the defaults", async () => {
+      const { provider, requests } = mockProvider(
+        { getAccountInfo: () => withContext(counterAccount(1n)) },
+        { opts: { skipPreflight: true } }
+      );
+      const program = new Program<CounterIdl>(idl, provider);
+
+      await program.account.counter.fetch(randomAddress());
+
+      expect(provider.opts).toEqual({
+        skipPreflight: true,
+        commitment: "confirmed",
+        preflightCommitment: "confirmed",
+      });
+      expect((requests[0].params[1] as any).commitment).toBe("confirmed");
+    });
+
+    it("falls back to the Kit default for providers without options", async () => {
+      const { provider: inner, requests } = mockProvider({
+        getAccountInfo: () => withContext(counterAccount(1n)),
+      });
+      // A custom provider implementing only the reading side.
+      const provider: Provider = {
+        rpc: inner.rpc,
+        rpcSubscriptions: inner.rpcSubscriptions,
+        get connection(): never {
+          throw new Error("unused");
+        },
+      };
+      const program = new Program<CounterIdl>(idl, provider);
+
+      await program.account.counter.fetch(randomAddress());
+
+      // Kit only applies its client default when the key is absent; an
+      // explicit `commitment: undefined` is stripped and reads at the
+      // server default instead.
+      expect((requests[0].params[1] as any).commitment).toBe("confirmed");
+    });
+
+    it("subscribes at the completed default commitment", async () => {
+      const calls: unknown[][] = [];
+      const { provider } = mockProvider(
+        {},
+        {
+          opts: { skipPreflight: true },
+          subscriptions: {
+            accountNotifications: (...args: unknown[]) => {
+              calls.push(args);
+              return {
+                subscribe: async () =>
+                  (async function* () {
+                    await new Promise(() => {});
+                  })(),
+              };
+            },
+          },
+        }
+      );
+      const program = new Program<CounterIdl>(idl, provider);
+      const controller = new AbortController();
+
+      program.account.counter.subscribe(randomAddress(), {
+        abortSignal: controller.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      controller.abort();
+
+      expect(calls[0][1]).toEqual({
+        commitment: "confirmed",
+        encoding: "base64",
+      });
     });
   });
 
