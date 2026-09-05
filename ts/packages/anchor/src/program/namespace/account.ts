@@ -26,6 +26,7 @@ import Provider, { getProvider } from "../../provider.js";
 import { Idl, IdlAccount } from "../../idl.js";
 import { Coder, BorshCoder } from "../../coder/index.js";
 import { Address, toAddress } from "../common.js";
+import { withProviderDefaults } from "../../utils/common.js";
 import { AllAccountsMap, IdlAccounts } from "./types.js";
 import * as rpcUtil from "../../utils/rpc.js";
 
@@ -168,19 +169,6 @@ export class AccountClient<
   }
 
   /**
-   * Applies the provider's default commitment to a read config, so that an
-   * account written at that commitment can be read straight back.
-   */
-  private withDefaults<C extends { commitment?: Commitment }>(
-    config: C = {} as C
-  ): C {
-    return {
-      ...config,
-      commitment: config.commitment ?? this._provider.opts?.commitment,
-    };
-  }
-
-  /**
    * Returns the account at the given address, whether it exists or not.
    *
    * @param address The address of the account to fetch.
@@ -204,7 +192,10 @@ export class AccountClient<
     config: FetchAccountConfig = {}
   ): Promise<{ account: MaybeAccount<T>; context: { slot: Slot } }> {
     const kitAddress = toAddress(address);
-    const { abortSignal, ...rpcConfig } = this.withDefaults(config);
+    const { abortSignal, ...rpcConfig } = withProviderDefaults(
+      this._provider,
+      config
+    );
     const { value, context } = await this._provider.rpc
       .getAccountInfo(kitAddress, { ...rpcConfig, encoding: "base64" })
       .send({ abortSignal });
@@ -277,7 +268,7 @@ export class AccountClient<
     const batches = await rpcUtil.getMultipleAccountsAndContext(
       this._provider.rpc,
       addresses.map(toAddress),
-      this.withDefaults(config)
+      withProviderDefaults(this._provider, config)
     );
     return batches.map(({ accounts, context }) => ({
       accounts: accounts.map((account) =>
@@ -306,7 +297,10 @@ export class AccountClient<
           ? Buffer.from(filters as ReadonlyUint8Array)
           : undefined
       );
-    const { abortSignal, ...rpcConfig } = this.withDefaults(config);
+    const { abortSignal, ...rpcConfig } = withProviderDefaults(
+      this._provider,
+      config
+    );
     const accounts = await this._provider.rpc
       .getProgramAccounts(this._programAddress, {
         ...rpcConfig,
@@ -359,8 +353,10 @@ export class AccountClient<
       );
     }
     const kitAddress = toAddress(address);
-    const { abortSignal = new AbortController().signal, commitment } =
-      this.withDefaults(config);
+    const {
+      abortSignal = new AbortController().signal,
+      ...subscriptionConfig
+    } = withProviderDefaults(this._provider, config);
     const target = new EventTarget() as TypedEventTarget<{
       change: CustomEvent<Account<T>>;
       error: CustomEvent<unknown>;
@@ -368,7 +364,10 @@ export class AccountClient<
 
     (async () => {
       const notifications = await rpcSubscriptions
-        .accountNotifications(kitAddress, { commitment, encoding: "base64" })
+        .accountNotifications(kitAddress, {
+          ...subscriptionConfig,
+          encoding: "base64",
+        })
         .subscribe({ abortSignal });
       for await (const { value } of notifications) {
         const account = decodeAccount(
