@@ -34,10 +34,13 @@ import {
   setTransactionMessageLifetimeUsingBlockhash,
   Signature,
   signTransactionMessageWithSigners,
-  SolanaRpcApi,
+  SolanaRpcApiMainnet,
   SolanaRpcSubscriptionsApi,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
+  SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED,
   Transaction as KitTransaction,
+  TransactionModifyingSigner,
+  TransactionPartialSigner,
   TransactionSigner,
   TransactionWithBlockhashLifetime,
   TransactionWithLifetime,
@@ -55,15 +58,27 @@ import {
   VersionedTransaction,
 } from "@solana/web3.js";
 import { isBrowser, isVersionedTransaction } from "./utils/common.js";
+import { findSolanaError } from "./error.js";
 import { SuccessfulTxSimulationResponse } from "./utils/rpc.js";
+import { createLocalWallet } from "./wallet.js";
 
 /**
  * A Kit-style client carrying the RPC capabilities the provider needs: an
  * `rpc` object for the Solana JSON-RPC API and an `rpcSubscriptions` object
- * for the Solana RPC subscriptions API.
+ * for the Solana RPC subscriptions API. `SolanaRpcApiMainnet` is the common
+ * denominator across clusters, so cluster-specific clients are accepted too.
  */
-export type SolanaClient = ClientWithRpc<SolanaRpcApi> &
+export type SolanaClient = ClientWithRpc<SolanaRpcApiMainnet> &
   ClientWithRpcSubscriptions<SolanaRpcSubscriptionsApi>;
+
+/**
+ * A Kit signer that can sign transactions before they are sent, as required
+ * by the provider's wallet: sending-only signers cannot pre-sign and are
+ * therefore not supported.
+ */
+export type WalletSigner =
+  | TransactionPartialSigner
+  | TransactionModifyingSigner;
 
 /**
  * Endpoints used to construct an {@link AnchorProvider}. When given a single
@@ -74,11 +89,11 @@ export type ClusterEndpoints = string | { url: string; websocketUrl?: string };
 
 export default interface Provider {
   /** Kit RPC client for the Solana JSON-RPC API. */
-  readonly rpc: Rpc<SolanaRpcApi>;
+  readonly rpc: Rpc<SolanaRpcApiMainnet>;
   /** Kit RPC client for the Solana RPC subscriptions API. */
   readonly rpcSubscriptions?: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   /** The signer paying for and co-signing transactions sent by this provider. */
-  readonly wallet?: TransactionSigner;
+  readonly wallet?: WalletSigner;
 
   /**
    * @deprecated Legacy web3.js bridge, consumed by the program namespaces
@@ -114,7 +129,7 @@ export default interface Provider {
  * by the provider.
  */
 export class AnchorProvider implements Provider {
-  readonly rpc: Rpc<SolanaRpcApi>;
+  readonly rpc: Rpc<SolanaRpcApiMainnet>;
   readonly rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   readonly publicKey: PublicKey;
 
@@ -132,7 +147,7 @@ export class AnchorProvider implements Provider {
    */
   constructor(
     client: ClusterEndpoints | SolanaClient,
-    readonly wallet: TransactionSigner,
+    readonly wallet: WalletSigner,
     readonly opts: ConfirmOptions = AnchorProvider.defaultOptions()
   ) {
     if (typeof client === "object" && "rpc" in client) {
@@ -151,9 +166,7 @@ export class AnchorProvider implements Provider {
     }
     this.publicKey = new PublicKey(wallet.address);
     this.#sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
-      rpc: this.rpc as Parameters<
-        typeof sendAndConfirmTransactionFactory
-      >[0]["rpc"],
+      rpc: this.rpc,
       rpcSubscriptions: this.rpcSubscriptions,
     });
   }
@@ -199,7 +212,6 @@ export class AnchorProvider implements Provider {
       throw new Error(`Provider local is not available on browser.`);
     }
 
-    const { createLocalWallet } = require("./wallet.js");
     return new AnchorProvider(
       url ?? "http://127.0.0.1:8899",
       createLocalWallet(),
@@ -224,7 +236,6 @@ export class AnchorProvider implements Provider {
       throw new Error("ANCHOR_PROVIDER_URL is not defined");
     }
 
-    const { createLocalWallet } = require("./wallet.js");
     return new AnchorProvider(url, createLocalWallet());
   }
 
@@ -297,9 +308,16 @@ export class AnchorProvider implements Provider {
       try {
         return await this.#sendSigned(signed, opts, commitment);
       } catch (err) {
+        // The message check is a fallback: Kit strips human-readable error
+        // messages from production builds, so control flow must rely on the
+        // error code in the cause chain.
         const isAlreadyProcessed =
-          err instanceof Error &&
-          err.message.includes("already been processed");
+          findSolanaError(
+            err,
+            SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED
+          ) !== undefined ||
+          (err instanceof Error &&
+            err.message.includes("already been processed"));
         const canRetry =
           isAlreadyProcessed &&
           !callerSetBlockhash &&
@@ -319,7 +337,9 @@ export class AnchorProvider implements Provider {
    * Similar to `sendAndConfirm`, but for an array of transactions and signers.
    *
    * The wallet co-signs the whole batch in a single request so that wallets
-   * prompting the user for each signature only prompt once.
+   * prompting the user for each signature only prompt once. As in v1, the
+   * extra signers sign before the wallet, so a modifying wallet that alters
+   * a message invalidates their signatures.
    *
    * @param txWithSigners Array of transactions and signers.
    * @param opts          Transaction confirmation options.
@@ -485,12 +505,22 @@ export class AnchorProvider implements Provider {
     lifetime: Readonly<{ blockhash: Blockhash; lastValidBlockHeight: bigint }>,
     { walletSigns = true }: { walletSigns?: boolean } = {}
   ) {
+    if (tx.nonceInfo) {
+      throw new Error(
+        "Durable nonce transactions are not supported by the provider yet."
+      );
+    }
+
     const feePayer = address((tx.feePayer ?? this.publicKey).toBase58());
+    const signers = walletSigns ? [this.wallet, ...extraSigners] : extraSigners;
+    const feePayerSigner = signers.find(
+      (signer) => signer.address === feePayer
+    );
     return pipe(
       createTransactionMessage({ version: "legacy" }),
       (message) =>
-        walletSigns && feePayer === this.wallet.address
-          ? setTransactionMessageFeePayerSigner(this.wallet, message)
+        feePayerSigner
+          ? setTransactionMessageFeePayerSigner(feePayerSigner, message)
           : setTransactionMessageFeePayer(feePayer, message),
       (message) =>
         setTransactionMessageLifetimeUsingBlockhash(lifetime, message),
@@ -499,11 +529,7 @@ export class AnchorProvider implements Provider {
           tx.instructions.map(fromLegacyInstruction),
           message
         ),
-      (message) =>
-        addSignersToTransactionMessage(
-          walletSigns ? [this.wallet, ...extraSigners] : extraSigners,
-          message
-        )
+      (message) => addSignersToTransactionMessage(signers, message)
     );
   }
 
@@ -639,7 +665,11 @@ export class ProviderError extends Error {
   }
 }
 
-class SimulateError extends Error {
+/**
+ * An error thrown when a transaction simulation fails, carrying the full
+ * simulation response including its logs.
+ */
+export class SimulateError extends Error {
   constructor(
     readonly simulationResponse: SuccessfulTxSimulationResponse & {
       err: unknown;

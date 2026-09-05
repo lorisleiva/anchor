@@ -6,7 +6,6 @@ import {
   KeyPairSigner,
   ReadonlyUint8Array,
   TransactionPartialSigner,
-  TransactionSigner,
 } from "@solana/kit";
 import { isBrowser } from "./utils/common.js";
 
@@ -52,7 +51,7 @@ export function createWallet(
  *
  * (This API is for Node only.)
  */
-export function createLocalWallet(): TransactionSigner {
+export function createLocalWallet(): TransactionPartialSigner {
   if (isBrowser) {
     throw new Error("Local wallet is not available in the browser.");
   }

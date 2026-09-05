@@ -10,9 +10,12 @@ import {
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
   RpcTransport,
+  SolanaError,
+  SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE,
 } from "@solana/kit";
 import { AnchorProvider, ProviderError, SolanaClient } from "../src/provider";
+import { ProgramError, translateError } from "../src/error";
 import { createWallet } from "../src/wallet";
 
 const BLOCKHASH = "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N";
@@ -162,6 +165,29 @@ describe("AnchorProvider", () => {
       );
     });
 
+    it("signs a fee payer that appears only as fee payer", async () => {
+      const { provider, wallet, requests } = mockProvider({
+        getLatestBlockhash: latestBlockhashResponse,
+        simulateTransaction: simulationResponse,
+      });
+
+      // Gas-sponsor pattern: the sponsor pays fees but is not referenced by
+      // any instruction; it must still end up signing.
+      const sponsor = Keypair.generate();
+      const tx = transferTransaction(wallet.publicKey);
+      tx.feePayer = sponsor.publicKey;
+      await provider.simulate(tx, [sponsor]);
+
+      const request = requests.find((r) => r.method === "simulateTransaction")!;
+      const { transaction, message } = decodeWireTransaction(request);
+      expect(message.staticAccounts[0]).toBe(sponsor.publicKey.toBase58());
+      const signatures = Object.entries(transaction.signatures);
+      expect(signatures).toHaveLength(2);
+      for (const [, signature] of signatures) {
+        expect(signature).not.toBeNull();
+      }
+    });
+
     it("signs and verifies signatures when signers are provided", async () => {
       const { provider, wallet, requests } = mockProvider({
         getLatestBlockhash: latestBlockhashResponse,
@@ -309,9 +335,12 @@ describe("AnchorProvider", () => {
       ).toHaveLength(3);
     });
 
-    it("recovers logs of transactions that landed but failed", async () => {
-      const logs = ["Program log: AnchorError occurred. Error Code: 6000."];
-      const failure = new Error("Transaction confirmation failed");
+    it("recovers logs and translates errors of failed sends", async () => {
+      const logs = ["Program log: Custom error"];
+      const failure = new SolanaError(SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM, {
+        code: 6000,
+        index: 0,
+      });
       const { provider, wallet } = mockProvider({
         getLatestBlockhash: latestBlockhashResponse,
         sendTransaction: () => {
@@ -329,6 +358,33 @@ describe("AnchorProvider", () => {
       );
       await expect(promise).rejects.toThrow(ProviderError);
       await expect(promise).rejects.toMatchObject({ logs });
+
+      // The Kit error survives in the cause chain, so translateError can
+      // resolve the custom error code without message scraping.
+      const err = await promise.catch((e) => e);
+      const translated = translateError(err, new Map([[6000, "Custom error"]]));
+      expect(translated).toBeInstanceOf(ProgramError);
+      expect(translated.code).toBe(6000);
+      expect(translated.msg).toBe("Custom error");
+    });
+
+    it("rejects durable nonce transactions explicitly", async () => {
+      const { provider, wallet } = mockProvider({
+        getLatestBlockhash: latestBlockhashResponse,
+      });
+
+      const tx = transferTransaction(wallet.publicKey);
+      tx.nonceInfo = {
+        nonce: BLOCKHASH,
+        nonceInstruction: SystemProgram.nonceAdvance({
+          noncePubkey: Keypair.generate().publicKey,
+          authorizedPubkey: wallet.publicKey,
+        }),
+      };
+
+      await expect(provider.sendAndConfirm(tx)).rejects.toThrow(
+        "Durable nonce transactions are not supported"
+      );
     });
   });
 });

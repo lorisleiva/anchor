@@ -10,11 +10,13 @@ export {
   setProvider,
   AnchorProvider,
   ProviderError,
+  SimulateError,
 } from "./provider.js";
 export type {
   SolanaClient,
   ClusterEndpoints,
   ConfirmOptionsWithBlockhash,
+  WalletSigner,
 } from "./provider.js";
 export { createWallet, createLocalWallet } from "./wallet.js";
 export * from "./error.js";
