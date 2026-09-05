@@ -57,8 +57,11 @@ import {
   TransactionSignature,
   VersionedTransaction,
 } from "@solana/web3.js";
-import { isBrowser, isVersionedTransaction } from "./utils/common.js";
-import { findSolanaError } from "./error.js";
+import {
+  findSolanaError,
+  isBrowser,
+  isVersionedTransaction,
+} from "./utils/common.js";
 import { SuccessfulTxSimulationResponse } from "./utils/rpc.js";
 import { createLocalWallet } from "./wallet.js";
 

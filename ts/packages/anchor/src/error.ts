@@ -1,11 +1,7 @@
-import {
-  isSolanaError,
-  SolanaError,
-  SolanaErrorCode,
-  SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
-} from "@solana/kit";
+import { SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM } from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
 import * as errors from "@anchor-lang/errors";
+import { findSolanaError } from "./utils/common.js";
 import * as features from "./utils/features.js";
 
 export class IdlError extends Error {
@@ -293,22 +289,6 @@ export class ProgramError extends Error {
   public toString(): string {
     return this.msg;
   }
-}
-
-/**
- * Finds a Kit `SolanaError` with the given code in the cause chain of the
- * given error, including the error itself.
- */
-export function findSolanaError<TCode extends SolanaErrorCode>(
-  err: unknown,
-  code: TCode
-): SolanaError<TCode> | undefined {
-  for (let cause: unknown = err; cause instanceof Error; cause = cause.cause) {
-    if (isSolanaError(cause, code)) {
-      return cause;
-    }
-  }
-  return undefined;
 }
 
 export function translateError(err: any, idlErrors: Map<number, string>) {
