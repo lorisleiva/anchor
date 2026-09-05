@@ -337,13 +337,13 @@ export class AccountClient<
    * controller.abort();
    * ```
    *
-   * Aborting the signal is the only way to stop listening: without one, the
-   * subscription lives as long as the process. Turn it into an async
-   * iterable with Kit's `createAsyncIterableFromDataPublisher` if preferred.
+   * Aborting the signal is the only way to stop listening. Turn the
+   * subscription into an async iterable with Kit's
+   * `createAsyncIterableFromDataPublisher` if preferred.
    */
   subscribe(
     address: Address,
-    config: { commitment?: Commitment; abortSignal?: AbortSignal } = {}
+    config: { abortSignal: AbortSignal; commitment?: Commitment }
   ): DataPublisher<AccountSubscriptionEvents<T>> {
     const { rpcSubscriptions } = this._provider;
     if (!rpcSubscriptions) {
@@ -353,10 +353,10 @@ export class AccountClient<
       );
     }
     const kitAddress = toAddress(address);
-    const {
-      abortSignal = new AbortController().signal,
-      ...subscriptionConfig
-    } = withProviderDefaults(this._provider, config);
+    const { abortSignal, ...subscriptionConfig } = withProviderDefaults(
+      this._provider,
+      config
+    );
     const target = new EventTarget() as TypedEventTarget<{
       change: CustomEvent<Account<T>>;
       error: CustomEvent<unknown>;
