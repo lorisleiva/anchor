@@ -498,7 +498,9 @@ describe("AccountClient", () => {
 
       const error = await new Promise<unknown>((resolve) => {
         program.account.counter
-          .subscribe(randomAddress())
+          .subscribe(randomAddress(), {
+            abortSignal: new AbortController().signal,
+          })
           .on("error", (e) => resolve(e));
       });
 
