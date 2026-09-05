@@ -47,27 +47,24 @@ function spiedWallet() {
 
 describe("AnchorProvider", () => {
   describe("construction", () => {
-    it("exposes the wallet address as a legacy public key", () => {
-      const { provider, wallet } = mockProvider({});
-      expect(provider.publicKey.toBase58()).toBe(wallet.address);
-    });
-
-    it("does not expose the legacy connection when built from a Kit client", () => {
-      const { provider } = mockProvider({});
-      expect(() => provider.connection).toThrow(
-        "constructed from cluster endpoints"
-      );
-    });
-
-    it("exposes the legacy connection when built from endpoints", () => {
+    it("builds Kit clients from cluster endpoints", () => {
       const wallet = Keypair.generate();
       const provider = new AnchorProvider(
         "http://127.0.0.1:8899",
         createWallet(wallet.secretKey)
       );
-      expect(provider.connection.rpcEndpoint).toBe("http://127.0.0.1:8899");
       expect(provider.rpc).toBeDefined();
       expect(provider.rpcSubscriptions).toBeDefined();
+      expect(provider.wallet.address).toBe(wallet.publicKey.toBase58());
+    });
+
+    it("completes partial options with the defaults", () => {
+      const { provider } = mockProvider({}, { opts: { skipPreflight: true } });
+      expect(provider.opts).toEqual({
+        skipPreflight: true,
+        commitment: "confirmed",
+        preflightCommitment: "confirmed",
+      });
     });
   });
 
