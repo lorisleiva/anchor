@@ -223,14 +223,12 @@ export class AnchorProvider implements Provider {
    * Returns a `Provider` with a wallet read from the local filesystem.
    *
    * @param url  The network cluster url.
-   * @param opts The default transaction confirmation options.
+   * @param opts The default transaction confirmation options, completed
+   *             from {@link defaultOptions}.
    *
    * (This api is for Node only.)
    */
-  static local(
-    url?: string,
-    opts: ConfirmOptions = AnchorProvider.defaultOptions()
-  ): AnchorProvider {
+  static local(url?: string, opts?: ConfirmOptions): AnchorProvider {
     if (isBrowser) {
       throw new Error(`Provider local is not available on browser.`);
     }
