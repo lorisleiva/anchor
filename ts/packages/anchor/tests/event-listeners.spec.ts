@@ -186,6 +186,42 @@ describe("Program.addEventListener", () => {
     expect(errors).toEqual([[failure, { fatal: false }]]);
   });
 
+  it("delivers the remaining events of a batch when the callback throws", async () => {
+    const { provider } = mockProvider(
+      {},
+      {
+        subscriptions: logsSubscriptions([
+          logsNotification([
+            eventLog([1, 2, 3, 4, 5, 6, 7, 8], 1n),
+            eventLog([1, 2, 3, 4, 5, 6, 7, 8], 2n),
+          ]),
+        ]),
+      }
+    );
+    const program = new Program<CounterIdl>(idl, provider);
+    const controller = new AbortController();
+
+    const received: bigint[] = [];
+    const errors: unknown[] = [];
+    program.addEventListener(
+      "incremented",
+      (event) => {
+        received.push(event.count);
+        if (event.count === 1n) throw new Error("callback failed");
+      },
+      {
+        abortSignal: controller.signal,
+        onError: (error) => errors.push(error),
+      }
+    );
+    await nextTick();
+    controller.abort();
+
+    // Both events of the transaction are delivered, one failure reported.
+    expect(received).toEqual([1n, 2n]);
+    expect(errors).toHaveLength(1);
+  });
+
   it("skips log batches it cannot parse", async () => {
     const { provider } = mockProvider(
       {},

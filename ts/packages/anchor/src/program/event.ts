@@ -37,10 +37,11 @@ export type EventListenerOptions = {
   commitment?: Commitment;
   /**
    * Invoked when a notification cannot be processed (unparseable logs, a
-   * failing decode, or the callback throwing), in which case the listener
-   * keeps going, and when the subscription itself fails, in which case
-   * `fatal` is true and no further events are delivered: listen again with
-   * a fresh abort signal to resubscribe.
+   * failing decode, or the callback throwing for one event), in which case
+   * the listener keeps going, and when the subscription itself fails, in
+   * which case `fatal` is true and no further events are delivered: listen
+   * again with a fresh abort signal to resubscribe. Must not throw: a
+   * throwing handler ends the listener as a fatal failure.
    */
   onError?: (error: unknown, context: { fatal: boolean }) => void;
 };
@@ -74,8 +75,9 @@ export class EventManager {
    *
    * Each listener holds its own log subscription; Kit coalesces identical
    * subscriptions into a single one on the wire. A notification that cannot
-   * be processed is reported through `onError` and skipped; only a failure
-   * of the subscription itself ends the listener.
+   * be processed, or an event the callback throws on, is reported through
+   * `onError` and skipped; only a failure of the subscription itself ends
+   * the listener.
    */
   public addEventListener(
     eventName: string,
@@ -107,8 +109,13 @@ export class EventManager {
         }
         try {
           for (const event of this._eventParser.parseLogs(value.logs)) {
-            if (event.name === eventName) {
+            if (event.name !== eventName) {
+              continue;
+            }
+            try {
               callback(event.data, context.slot, value.signature);
+            } catch (error) {
+              onError?.(error, { fatal: false });
             }
           }
         } catch (error) {
