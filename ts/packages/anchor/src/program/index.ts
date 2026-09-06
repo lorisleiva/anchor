@@ -417,7 +417,10 @@ export class Program<IDL extends Idl = Idl> {
    * @param callback  The function to invoke whenever the event is emitted from
    *                  program logs.
    * @param options   The abort signal ending the subscription, the commitment
-   *                  to listen at and an error handler for the subscription.
+   *                  to listen at, and an error handler: notifications that
+   *                  cannot be processed are reported and skipped, while a
+   *                  failure of the subscription itself is reported as fatal
+   *                  and ends the listener.
    */
   public addEventListener<E extends keyof IdlEvents<IDL>>(
     eventName: E & string,
