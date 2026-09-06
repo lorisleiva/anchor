@@ -35,15 +35,20 @@ export type EventListenerOptions = {
   abortSignal: AbortSignal;
   /** The commitment to listen at, defaulting to the provider's. */
   commitment?: Commitment;
-  /** Invoked if the underlying log subscription fails. */
-  onError?: (error: unknown) => void;
+  /**
+   * Invoked when a notification cannot be processed (unparseable logs, a
+   * failing decode, or the callback throwing), in which case the listener
+   * keeps going, and when the subscription itself fails, in which case
+   * `fatal` is true and no further events are delivered: listen again with
+   * a fresh abort signal to resubscribe.
+   */
+  onError?: (error: unknown, context: { fatal: boolean }) => void;
 };
 
 export class EventManager {
   /**
-   * Program ID for event subscriptions.
+   * Program address for event subscriptions.
    */
-  private _programId: PublicKey;
   private _programAddress: Address;
 
   /**
@@ -57,7 +62,6 @@ export class EventManager {
   private _eventParser: EventParser;
 
   constructor(programId: PublicKey, provider: Provider, coder: Coder) {
-    this._programId = programId;
     this._programAddress = toAddress(programId);
     this._provider = provider;
     this._eventParser = new EventParser(programId, coder);
@@ -69,7 +73,9 @@ export class EventManager {
    * until the abort signal fires.
    *
    * Each listener holds its own log subscription; Kit coalesces identical
-   * subscriptions into a single one on the wire.
+   * subscriptions into a single one on the wire. A notification that cannot
+   * be processed is reported through `onError` and skipped; only a failure
+   * of the subscription itself ends the listener.
    */
   public addEventListener(
     eventName: string,
@@ -83,8 +89,10 @@ export class EventManager {
           "`rpcSubscriptions` client."
       );
     }
-    const { abortSignal } = options;
-    const { commitment } = withProviderDefaults(this._provider, options);
+    const { abortSignal, onError } = options;
+    const { commitment } = withProviderDefaults(this._provider, {
+      commitment: options.commitment,
+    });
 
     (async () => {
       const notifications = await rpcSubscriptions
@@ -97,15 +105,19 @@ export class EventManager {
         if (value.err) {
           continue;
         }
-        for (const event of this._eventParser.parseLogs([...value.logs])) {
-          if (event.name === eventName) {
-            callback(event.data, context.slot, value.signature);
+        try {
+          for (const event of this._eventParser.parseLogs(value.logs)) {
+            if (event.name === eventName) {
+              callback(event.data, context.slot, value.signature);
+            }
           }
+        } catch (error) {
+          onError?.(error, { fatal: false });
         }
       }
     })().catch((error) => {
       if (!abortSignal.aborted) {
-        options.onError?.(error);
+        onError?.(error, { fatal: true });
       }
     });
   }
@@ -135,7 +147,7 @@ export class EventParser {
   // emitted by *this* program. If it was, then we parse the raw string and
   // emit the event if the string matches the event being subscribed to.
   public *parseLogs(
-    logs: string[],
+    logs: readonly string[],
     errorOnDecodeFailure = false
   ): Generator<Event> {
     const scanner = new LogScanner([...logs]);

@@ -152,6 +152,80 @@ describe("Program.addEventListener", () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it("keeps listening when the callback throws", async () => {
+    const { provider } = mockProvider(
+      {},
+      {
+        subscriptions: logsSubscriptions([
+          logsNotification([eventLog([1, 2, 3, 4, 5, 6, 7, 8], 1n)]),
+          logsNotification([eventLog([1, 2, 3, 4, 5, 6, 7, 8], 2n)]),
+        ]),
+      }
+    );
+    const program = new Program<CounterIdl>(idl, provider);
+    const controller = new AbortController();
+    const failure = new Error("callback failed");
+
+    const received: bigint[] = [];
+    const errors: [unknown, { fatal: boolean }][] = [];
+    program.addEventListener(
+      "incremented",
+      (event) => {
+        received.push(event.count);
+        if (event.count === 1n) throw failure;
+      },
+      {
+        abortSignal: controller.signal,
+        onError: (error, context) => errors.push([error, context]),
+      }
+    );
+    await nextTick();
+    controller.abort();
+
+    expect(received).toEqual([1n, 2n]);
+    expect(errors).toEqual([[failure, { fatal: false }]]);
+  });
+
+  it("skips log batches it cannot parse", async () => {
+    const { provider } = mockProvider(
+      {},
+      {
+        subscriptions: logsSubscriptions([
+          {
+            ...logsNotification([]),
+            value: {
+              err: null,
+              // Not the `invoke [1]` line the parser expects first.
+              logs: [`Program ${PROGRAM_ADDRESS} success`],
+              signature: SIGNATURE,
+            },
+          },
+          logsNotification([eventLog([1, 2, 3, 4, 5, 6, 7, 8], 3n)]),
+        ]),
+      }
+    );
+    const program = new Program<CounterIdl>(idl, provider);
+    const controller = new AbortController();
+
+    const received: bigint[] = [];
+    const errors: [unknown, { fatal: boolean }][] = [];
+    program.addEventListener(
+      "incremented",
+      (event) => received.push(event.count),
+      {
+        abortSignal: controller.signal,
+        onError: (error, context) => errors.push([error, context]),
+      }
+    );
+    await nextTick();
+    controller.abort();
+
+    expect(received).toEqual([3n]);
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0][0])).toMatch(/Unexpected first log line/);
+    expect(errors[0][1]).toEqual({ fatal: false });
+  });
+
   it("stops listening when the signal is aborted", async () => {
     const aborted: AbortSignal[] = [];
     const { provider } = mockProvider(
@@ -193,15 +267,18 @@ describe("Program.addEventListener", () => {
     );
     const program = new Program<CounterIdl>(idl, provider);
 
-    const error = await new Promise<unknown>((resolve) => {
-      program.addEventListener("reset", () => {}, {
-        abortSignal: new AbortController().signal,
-        commitment: "processed",
-        onError: resolve,
-      });
-    });
+    const reported = await new Promise<[unknown, { fatal: boolean }]>(
+      (resolve) => {
+        program.addEventListener("reset", () => {}, {
+          abortSignal: new AbortController().signal,
+          commitment: "processed",
+          onError: (error, context) => resolve([error, context]),
+        });
+      }
+    );
 
-    expect(error).toBe(failure);
+    // The subscription itself failed: the listener is finished.
+    expect(reported).toEqual([failure, { fatal: true }]);
     expect(calls[0][1]).toEqual({ commitment: "processed" });
   });
 
