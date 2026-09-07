@@ -228,7 +228,14 @@ export class AccountsResolver<IDL extends Idl> {
         programId: this._programId,
         idlIx: this._idlIx,
       });
-      this._accounts = accounts;
+      // The methods builder shares this object, so a resolver returning a
+      // fresh one is written back in place; legacy public keys it may
+      // return are normalised to addresses like every other input.
+      const normalised = normaliseAccounts(accounts);
+      for (const name of Object.keys(this._accounts)) {
+        delete this._accounts[name];
+      }
+      Object.assign(this._accounts, normalised);
       return resolved;
     }
 
@@ -505,10 +512,10 @@ export class AccountsResolver<IDL extends Idl> {
       case "pubkey":
         return getAddressEncoder().encode(toAddress(value));
       case "bytes":
-        return Uint8Array.from(value);
+        return toBytes(value);
       default:
         if (type?.array) {
-          return Uint8Array.from(value);
+          return toBytes(value);
         }
 
         throw new Error(`Unexpected seed type: ${type}`);
@@ -558,6 +565,31 @@ export class AccountsResolver<IDL extends Idl> {
 
     return type as Extract<IdlType, string>;
   }
+}
+
+/**
+ * Encodes raw seed bytes given as a byte array or, as `Buffer.from` used to
+ * accept, a UTF-8 string.
+ */
+function toBytes(value: string | ArrayLike<number>): ReadonlyUint8Array {
+  return typeof value === "string"
+    ? getUtf8Encoder().encode(value)
+    : Uint8Array.from(value);
+}
+
+/**
+ * Converts every address in the given accounts, including legacy public
+ * keys, to a Kit address, preserving nesting.
+ */
+function normaliseAccounts(accounts: AccountsGeneric): AccountsGeneric {
+  return Object.fromEntries(
+    Object.entries(accounts).map(([name, value]) => [
+      name,
+      typeof value === "object" && value !== null && !("toBase58" in value)
+        ? normaliseAccounts(value)
+        : toAddress(value as AnchorAddress),
+    ])
+  );
 }
 
 // TODO: this should be configurable to avoid unnecessary requests.
