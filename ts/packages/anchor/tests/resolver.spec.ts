@@ -252,6 +252,67 @@ describe("AccountsResolver", () => {
     });
   });
 
+  it("normalises fresh custom resolver results into the shared accounts", async () => {
+    const { provider, wallet } = mockProvider({});
+    const vaultProgram = new PublicKey(randomAddress());
+    // A resolver that ignores the object it was given, returns a new one,
+    // and still speaks web3.js.
+    const resolver: CustomAccountResolver<ResolverIdl> = async ({
+      accounts,
+    }) => ({
+      accounts: { ...accounts, vaultProgram } as any,
+      resolved: "vaultProgram" in accounts ? 0 : 1,
+    });
+    const program = new Program<ResolverIdl>(
+      idl,
+      provider,
+      undefined,
+      () => resolver
+    );
+
+    const keys = await program.methods.open(1n, { tag: 0 }).pubkeys();
+
+    // The builder sees the resolver's result, as an address, and the PDA
+    // seeded from it resolved.
+    expect(keys.vaultProgram).toBe(vaultProgram.toBase58());
+    const [foreignVault] = await getProgramDerivedAddress({
+      programAddress: vaultProgram.toBase58() as Address,
+      seeds: [getAddressEncoder().encode(wallet.address)],
+    });
+    expect(keys.foreignVault).toBe(foreignVault);
+  });
+
+  it("encodes string byte seeds as UTF-8", async () => {
+    const bytesIdl = {
+      ...idl,
+      instructions: [
+        {
+          name: "tag",
+          discriminator: [1, 1, 1, 1, 1, 1, 1, 1],
+          accounts: [
+            {
+              name: "tagged",
+              pda: { seeds: [{ kind: "arg", path: "label" }] },
+            },
+          ],
+          args: [{ name: "label", type: "bytes" }],
+        },
+      ],
+    } as const satisfies Idl;
+    const { provider } = mockProvider({});
+    const program = new Program<typeof bytesIdl>(bytesIdl, provider);
+
+    const { tagged } = await program.methods
+      .tag("hello" as unknown as Uint8Array)
+      .pubkeys();
+
+    const [expected] = await getProgramDerivedAddress({
+      programAddress: PROGRAM_ADDRESS,
+      seeds: [getUtf8Encoder().encode("hello")],
+    });
+    expect(tagged).toBe(expected);
+  });
+
   it("reports the accounts it could not resolve", async () => {
     const { provider } = mockProvider({});
     const program = new Program<ResolverIdl>(idl, provider);
