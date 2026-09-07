@@ -48,6 +48,26 @@ describe("utils.token", () => {
   });
 });
 
+describe("utils.token with another token program", () => {
+  it("derives Token-2022 associated token addresses", async () => {
+    const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+    const mint = Keypair.generate().publicKey;
+    const owner = Keypair.generate().publicKey;
+    const [expected] = PublicKey.findProgramAddressSync(
+      [owner.toBuffer(), new PublicKey(TOKEN_2022).toBuffer(), mint.toBuffer()],
+      new PublicKey(utils.token.ASSOCIATED_PROGRAM_ID)
+    );
+
+    expect(
+      await utils.token.associatedAddress({
+        mint,
+        owner,
+        tokenProgram: TOKEN_2022,
+      })
+    ).toBe(expected.toBase58());
+  });
+});
+
 describe("utils.publicKey", () => {
   it("derives addresses with seeds like web3.js did", async () => {
     const base = Keypair.generate().publicKey;
@@ -137,6 +157,40 @@ describe("utils.registry", () => {
         .filter((r) => r.method === "getAccountInfo")
         .map((r) => r.params[0])
     ).toEqual([programAddress, programDataAddress]);
+  });
+
+  it("fails clearly when the program data account does not exist", async () => {
+    const programAddress = randomAddress();
+    const programDataAddress = randomAddress();
+    const programData = new Uint8Array(
+      loaderState.encode({
+        program: { programdataAddress: programDataAddress },
+      })
+    );
+    const { provider, requests } = mockProvider({
+      getAccountInfo: (request) => ({
+        context: { slot: 1 },
+        value:
+          request.params[0] === programAddress
+            ? {
+                data: [getBase64Decoder().decode(programData), "base64"],
+                executable: false,
+                lamports: 1,
+                owner: "BPFLoaderUpgradeab1e11111111111111111111111",
+                rentEpoch: 0,
+                space: programData.length,
+              }
+            : null,
+      }),
+    });
+
+    await expect(
+      utils.registry.fetchData(provider.rpc, programAddress)
+    ).rejects.toThrow("program data account not found");
+    // The walk stopped after the second hop.
+    expect(requests.filter((r) => r.method === "getAccountInfo")).toHaveLength(
+      2
+    );
   });
 
   it("fails clearly when the program does not exist", async () => {
