@@ -8,7 +8,7 @@ import {
   getMetadataEncoder,
   MetadataArgs,
 } from "@solana-program/program-metadata";
-import { gzip } from "pako";
+import { deflate, gzip } from "pako";
 import { Idl, Program } from "../src";
 import { mockProvider, randomAddress } from "./helpers/mock-provider";
 
@@ -71,13 +71,15 @@ describe("Program.fetchIdl", () => {
     });
   });
 
-  it("uncompresses compressed IDLs", async () => {
+  it.each([
+    ["none", Compression.None, (data: Uint8Array) => data],
+    ["gzip", Compression.Gzip, gzip],
+    ["zlib", Compression.Zlib, deflate],
+  ])("reads IDLs stored with %s compression", async (_, compression, pack) => {
     const program = randomAddress();
     const { provider } = mockProvider({
       getAccountInfo: () =>
-        metadataAccount(program, gzip(json as Uint8Array), {
-          compression: Compression.Gzip,
-        }),
+        metadataAccount(program, pack(json as Uint8Array), { compression }),
     });
 
     expect(await Program.fetchIdl(program, provider)).toEqual(idl);

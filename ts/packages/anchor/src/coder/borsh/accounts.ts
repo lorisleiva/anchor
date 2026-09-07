@@ -77,7 +77,7 @@ export class BorshAccountsCoder<A extends string = string>
 
   public decodeUnchecked<T = any>(accountName: A, data: ReadonlyUint8Array): T {
     const codec = this.codec(accountName);
-    return codec.item.decode(data.slice(codec.discriminator.length)) as T;
+    return codec.item.decode(data, codec.discriminator.length) as T;
   }
 
   public memcmp(accountName: A, appendData?: ReadonlyUint8Array): any {

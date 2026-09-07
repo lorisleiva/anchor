@@ -34,6 +34,9 @@ export * from "./context.js";
 export * from "./event.js";
 export * from "./namespace/index.js";
 
+/** The metadata seed under which `anchor idl init` stores a program's IDL. */
+const IDL_METADATA_SEED = "idl";
+
 /**
  * ## Program
  *
@@ -60,9 +63,6 @@ export * from "./namespace/index.js";
  * below will refer to the two counter examples found
  * [here](https://github.com/otter-sec/anchor#examples).
  */
-/** The metadata seed under which `anchor idl init` stores a program's IDL. */
-const IDL_METADATA_SEED = "idl";
-
 export class Program<IDL extends Idl = Idl> {
   /**
    * Async methods to send signed transactions to *non*-state methods on the
