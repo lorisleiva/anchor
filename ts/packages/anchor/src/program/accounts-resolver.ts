@@ -579,16 +579,20 @@ function toBytes(value: string | ArrayLike<number>): ReadonlyUint8Array {
 
 /**
  * Converts every address in the given accounts, including legacy public
- * keys, to a Kit address, preserving nesting.
+ * keys, to a Kit address, preserving nesting. Accounts left `null` or
+ * `undefined`, e.g. by a custom resolver that has not figured them out yet,
+ * are dropped so they read as unresolved.
  */
 function normaliseAccounts(accounts: AccountsGeneric): AccountsGeneric {
   return Object.fromEntries(
-    Object.entries(accounts).map(([name, value]) => [
-      name,
-      typeof value === "object" && value !== null && !("toBase58" in value)
-        ? normaliseAccounts(value)
-        : toAddress(value as AnchorAddress),
-    ])
+    Object.entries(accounts)
+      .filter(([, value]) => value != null)
+      .map(([name, value]) => [
+        name,
+        typeof value === "object" && !("toBase58" in value)
+          ? normaliseAccounts(value)
+          : toAddress(value as AnchorAddress),
+      ])
   );
 }
 
