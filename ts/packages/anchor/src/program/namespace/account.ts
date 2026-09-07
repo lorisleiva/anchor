@@ -155,7 +155,7 @@ export class AccountClient<
     this._size = this._coder.accounts.size(idlAccount.name);
     this._decoder = createDecoder({
       read: (bytes, offset) => [
-        this._coder.accounts.decode<T>(idlAccount.name, bytes.slice(offset)),
+        this._coder.accounts.decode<T>(idlAccount.name, bytes.subarray(offset)),
         bytes.length,
       ],
     });

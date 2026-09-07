@@ -80,6 +80,15 @@ type ResolvedAccountsRecursive<
   [N in A["name"]]: ResolvedAccount<A & { name: N }>;
 }>;
 
+/**
+ * Accounts the resolver fills in for event CPIs. Deliberately looser than the
+ * resolver, which only resolves them when `eventAuthority` is immediately
+ * followed by `program` (see `AccountsResolver.resolveEventCpi`): adjacency is
+ * not expressible here, so an unrelated account of the same name type-checks
+ * when omitted and fails at runtime. Keep the two in sync.
+ */
+type EventCpiAccountName = "eventAuthority" | "program";
+
 type ResolvedAccount<
   A extends IdlInstructionAccountItem = IdlInstructionAccountItem
 > = A extends IdlInstructionAccounts
@@ -90,7 +99,7 @@ type ResolvedAccount<
   ? never
   : A extends NonNullable<Pick<IdlInstructionAccount, "relations">>
   ? never
-  : A extends { name: "eventAuthority" | "program" }
+  : A extends { name: EventCpiAccountName }
   ? never
   : A extends { signer: true }
   ? AddressInput | undefined
