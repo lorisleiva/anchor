@@ -1,4 +1,5 @@
 import {
+  address,
   Address,
   fetchEncodedAccount,
   getAddressDecoder,
@@ -7,18 +8,19 @@ import {
   getI32Encoder,
   getI64Encoder,
   getI128Encoder,
+  getI256Encoder,
   getI8Encoder,
   getProgramDerivedAddress,
   getU16Encoder,
   getU32Encoder,
   getU64Encoder,
   getU128Encoder,
+  getU256Encoder,
   getU8Encoder,
   getUtf8Encoder,
   ReadonlyUint8Array,
 } from "@solana/kit";
 import { getTokenDecoder } from "@solana-program/token";
-import { Buffer } from "buffer";
 import {
   Idl,
   IdlSeed,
@@ -37,9 +39,8 @@ import {
 import { AllInstructions } from "./namespace/types.js";
 import Provider from "../provider.js";
 import { AccountsCoder, BorshAccountsCoder } from "../coder/index.js";
-import { getI256Codec, getU256Codec } from "../coder/borsh/codecs.js";
 import { withProviderDefaults } from "../utils/common.js";
-import { Address as AnchorAddress, Program, toAddress } from "./index.js";
+import { AddressInput, Program, toAddress } from "./index.js";
 import {
   PartialAccounts,
   flattenPartialAccounts,
@@ -71,6 +72,8 @@ export type CustomAccountResolver<IDL extends Idl> = (params: {
 // Populates a given accounts context with PDAs and common missing accounts.
 export class AccountsResolver<IDL extends Idl> {
   private _accountStore: AccountStore;
+  /** The last failure of each account that could not be resolved yet. */
+  private _failures = new Map<string, unknown>();
 
   constructor(
     private _args: any[],
@@ -132,8 +135,15 @@ export class AccountsResolver<IDL extends Idl> {
         const resolvableAccs = this._idlIx.accounts.filter(isResolvable);
         const unresolvedAccs = getPaths(resolvableAccs)
           .filter((path) => !this.get(path))
-          .map((path) => path.reduce((acc, p) => acc + "." + p))
-          .map((acc) => `\`${acc}\``)
+          .map((path) => path.join("."))
+          .map((acc) => {
+            const failure = this._failures.get(acc);
+            return failure
+              ? `\`${acc}\` (${
+                  failure instanceof Error ? failure.message : String(failure)
+                })`
+              : `\`${acc}\``;
+          })
           .join(", ");
 
         throw new Error(
@@ -209,7 +219,7 @@ export class AccountsResolver<IDL extends Idl> {
         // if not compound accounts, do null/optional check and proceed
         if (partialAccount !== null) {
           nestedAccountsGeneric[accountName] = toAddress(
-            partialAccount as AnchorAddress
+            partialAccount as AddressInput
           );
         } else if (accountItem["optional"]) {
           nestedAccountsGeneric[accountName] = this._programId;
@@ -313,7 +323,7 @@ export class AccountsResolver<IDL extends Idl> {
 
           // Set based on `address` field
           if (account.address) {
-            this.set([...path, name], toAddress(account.address));
+            this.set([...path, name], address(account.address));
           }
         }
       }
@@ -340,7 +350,8 @@ export class AccountsResolver<IDL extends Idl> {
           // Accounts might not get resolved successfully if a seed depends on
           // another seed to be resolved *and* the accounts for resolution are
           // out of order. In this case, skip the accounts that throw in order
-          // to resolve those accounts later.
+          // to resolve those accounts later, remembering why they failed in
+          // case they never do.
           try {
             if (account.pda) {
               const seeds = await Promise.all(
@@ -358,7 +369,9 @@ export class AccountsResolver<IDL extends Idl> {
 
               this.set([...path, name], address);
             }
-          } catch {}
+          } catch (error) {
+            this._failures.set([...path, name].join("."), error);
+          }
 
           try {
             if (account.relations) {
@@ -370,7 +383,9 @@ export class AccountsResolver<IDL extends Idl> {
                 this.set([...path, name], toAddress(account[name]));
               }
             }
-          } catch {}
+          } catch (error) {
+            this._failures.set([...path, name].join("."), error);
+          }
         }
       }
     }
@@ -504,9 +519,9 @@ export class AccountsResolver<IDL extends Idl> {
       case "i128":
         return getI128Encoder().encode(value);
       case "u256":
-        return getU256Codec().encode(value);
+        return getU256Encoder().encode(value);
       case "i256":
-        return getI256Codec().encode(value);
+        return getI256Encoder().encode(value);
       case "string":
         return getUtf8Encoder().encode(value);
       case "pubkey":
@@ -568,8 +583,7 @@ export class AccountsResolver<IDL extends Idl> {
 }
 
 /**
- * Encodes raw seed bytes given as a byte array or, as `Buffer.from` used to
- * accept, a UTF-8 string.
+ * Encodes raw seed bytes given as a byte array or a UTF-8 string.
  */
 function toBytes(value: string | ArrayLike<number>): ReadonlyUint8Array {
   return typeof value === "string"
@@ -591,7 +605,7 @@ function normaliseAccounts(accounts: AccountsGeneric): AccountsGeneric {
         name,
         typeof value === "object" && !("toBase58" in value)
           ? normaliseAccounts(value)
-          : toAddress(value as AnchorAddress),
+          : toAddress(value as AddressInput),
       ])
   );
 }
@@ -633,7 +647,7 @@ class AccountStore {
         const coder = await this.getAccountsCoder(accountInfo.programAddress);
         if (coder) {
           const account = (coder as BorshAccountsCoder).decodeAny(
-            Buffer.from(accountInfo.data)
+            accountInfo.data
           );
           this._cache.set(address, account);
         }
