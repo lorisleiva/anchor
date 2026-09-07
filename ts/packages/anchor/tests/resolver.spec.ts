@@ -282,6 +282,39 @@ describe("AccountsResolver", () => {
     expect(keys.foreignVault).toBe(foreignVault);
   });
 
+  it("treats holes in custom resolver results as unresolved", async () => {
+    const { provider } = mockProvider({});
+    const vaultProgram = randomAddress();
+    let calls = 0;
+    // First pass: not figured out yet; later passes: resolved once.
+    const resolver: CustomAccountResolver<ResolverIdl> = async ({
+      accounts,
+    }) => {
+      calls++;
+      if (calls === 1) {
+        return {
+          accounts: { ...accounts, vaultProgram: undefined } as any,
+          resolved: 0,
+        };
+      }
+      return {
+        accounts: { ...accounts, vaultProgram },
+        resolved: "vaultProgram" in accounts ? 0 : 1,
+      };
+    };
+    const program = new Program<ResolverIdl>(
+      idl,
+      provider,
+      undefined,
+      () => resolver
+    );
+
+    const keys = await program.methods.open(1n, { tag: 0 }).pubkeys();
+
+    expect(keys.vaultProgram).toBe(vaultProgram);
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
   it("encodes string byte seeds as UTF-8", async () => {
     const bytesIdl = {
       ...idl,
