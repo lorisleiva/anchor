@@ -1,4 +1,3 @@
-import { Buffer } from "buffer";
 import {
   Address,
   fetchEncodedAccount,
@@ -6,6 +5,7 @@ import {
   getStructCodec,
   getU32Codec,
   getU64Codec,
+  ReadonlyUint8Array,
   Rpc,
 } from "@solana/kit";
 import { Address as AnchorAddress, toAddress } from "../program/common.js";
@@ -64,9 +64,7 @@ export async function fetchData(
   if (!programAccount.exists) {
     throw new Error("program account not found");
   }
-  const { program } = decodeUpgradeableLoaderState(
-    Buffer.from(programAccount.data)
-  );
+  const { program } = decodeUpgradeableLoaderState(programAccount.data);
   const programDataAccount = await fetchEncodedAccount(
     rpc,
     program.programdataAddress
@@ -74,9 +72,7 @@ export async function fetchData(
   if (!programDataAccount.exists) {
     throw new Error("program data account not found");
   }
-  const { programData } = decodeUpgradeableLoaderState(
-    Buffer.from(programDataAccount.data)
-  );
+  const { programData } = decodeUpgradeableLoaderState(programDataAccount.data);
   return programData;
 }
 
@@ -103,7 +99,7 @@ const UPGRADEABLE_LOADER_STATE_CODEC = getRustEnumCodec(
   getU32Codec()
 );
 
-export function decodeUpgradeableLoaderState(data: Buffer): any {
+export function decodeUpgradeableLoaderState(data: ReadonlyUint8Array): any {
   return UPGRADEABLE_LOADER_STATE_CODEC.decode(data);
 }
 
