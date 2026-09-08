@@ -209,6 +209,12 @@ describe("coder.types", () => {
                 name: "tuple",
                 fields: ["string", "u8"],
               },
+              {
+                // Field names are passed through untouched, so names that
+                // Kit uses as discriminator properties are fine.
+                name: "reserved",
+                fields: [{ name: "__kind", type: "u8" }],
+              },
             ],
           },
         },
@@ -233,7 +239,17 @@ describe("coder.types", () => {
       tuple: { 0: "ab", 1: 7 },
     });
 
-    assert.throws(() => coder.types.encode("Side", { unknown: {} }));
+    const reserved = coder.types.encode("Side", { reserved: { __kind: 9 } });
+    assert.deepStrictEqual([...reserved], [3, 9]);
+    assert.deepStrictEqual(coder.types.decode("Side", reserved), {
+      reserved: { __kind: 9 },
+    });
+
+    assert.throws(
+      () => coder.types.encode("Side", { unknown: {} }),
+      /Invalid enum variant/
+    );
+    assert.throws(() => coder.types.decode("Side", Buffer.from([4])));
   });
 
   test("Can encode and decode coptions, reserving the payload slot for fixed-size None values", () => {
@@ -516,5 +532,87 @@ describe("coder.types", () => {
     assert.ok(decoded.data instanceof Uint8Array);
     assert.deepStrictEqual([...decoded.data], [1, 2, 3]);
     assert.deepStrictEqual(decoded.list, [500, 600]);
+  });
+
+  test("Preserves null characters and rejects invalid UTF-8 in strings", () => {
+    const idl: Idl = {
+      address: "Test111111111111111111111111111111111111111",
+      metadata: {
+        name: "basic_0",
+        version: "0.0.0",
+        spec: "0.1.0",
+      },
+      instructions: [],
+      types: [
+        {
+          name: "StringTest",
+          type: {
+            kind: "struct",
+            fields: [{ name: "text", type: "string" }],
+          },
+        },
+      ],
+    };
+
+    const coder = new BorshCoder(idl);
+
+    // Kit's UTF-8 codec strips null characters; borsh strings keep them.
+    const withNull = coder.types.encode("StringTest", { text: "a\0b" });
+    assert.deepStrictEqual([...withNull], [3, 0, 0, 0, 97, 0, 98]);
+    assert.deepStrictEqual(coder.types.decode("StringTest", withNull), {
+      text: "a\0b",
+    });
+
+    // Invalid UTF-8 bytes throw instead of decoding to U+FFFD.
+    assert.throws(() =>
+      coder.types.decode("StringTest", Buffer.from([2, 0, 0, 0, 0xff, 0xfe]))
+    );
+
+    // Lone surrogates cannot be represented in a Rust string.
+    assert.throws(
+      () => coder.types.encode("StringTest", { text: "\ud800" }),
+      /lone surrogates/
+    );
+  });
+
+  test("Throws when decoding a vector without its length prefix", () => {
+    const idl: Idl = {
+      address: "Test111111111111111111111111111111111111111",
+      metadata: {
+        name: "basic_0",
+        version: "0.0.0",
+        spec: "0.1.0",
+      },
+      instructions: [],
+      types: [
+        {
+          name: "VecTest",
+          type: {
+            kind: "struct",
+            fields: [
+              { name: "before", type: "u8" },
+              { name: "list", type: { vec: "u8" } },
+            ],
+          },
+        },
+      ],
+    };
+
+    const coder = new BorshCoder(idl);
+
+    assert.deepStrictEqual(
+      coder.types.decode("VecTest", Buffer.from([1, 0, 0, 0, 0])),
+      { before: 1, list: [] }
+    );
+    assert.deepStrictEqual(
+      coder.types.decode("VecTest", Buffer.from([1, 2, 0, 0, 0, 7, 8])),
+      { before: 1, list: [7, 8] }
+    );
+
+    // Kit decodes an exhausted byte array as an empty array; borsh rejects it.
+    assert.throws(() => coder.types.decode("VecTest", Buffer.from([1])));
+    assert.throws(() =>
+      coder.types.decode("VecTest", Buffer.from([1, 2, 0, 0, 0, 7]))
+    );
   });
 });

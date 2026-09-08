@@ -15,16 +15,17 @@ import {
   getU32Codec,
   getU64Codec,
   getU128Codec,
-  getUtf8Codec,
 } from "@solana/kit";
 import {
   getAnchorOptionCodec,
   getBoolCodec,
+  getBorshStringCodec,
   getCOptionCodec,
   getI256Codec,
   getPublicKeyCodec,
   getRustEnumCodec,
   getU256Codec,
+  getVecCodec,
   IdlCodec,
 } from "./codecs.js";
 import {
@@ -99,7 +100,7 @@ export class IdlCoder {
         return addCodecSizePrefix(getBytesCodec(), getU32Codec());
       }
       case "string": {
-        return addCodecSizePrefix(getUtf8Codec(), getU32Codec());
+        return getBorshStringCodec();
       }
       case "pubkey": {
         return getPublicKeyCodec();
@@ -120,7 +121,7 @@ export class IdlCoder {
           );
         }
         if ("vec" in field.type) {
-          return getArrayCodec(
+          return getVecCodec(
             IdlCoder.fieldCodec({ type: field.type.vec }, types, genericArgs)
           );
         }

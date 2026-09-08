@@ -1,23 +1,31 @@
 import {
+  addCodecSizePrefix,
   Address,
+  assertByteArrayHasEnoughBytesForCodec,
   assertNumberIsBetweenForCodec,
   Codec,
+  combineCodec,
+  createDecoder,
   Endian,
   FixedSizeCodec,
   getAddressCodec,
-  getDiscriminatedUnionCodec,
+  getArrayCodec,
+  getBytesCodec,
   getI128Codec,
   getOptionCodec,
   getTupleCodec,
   getU8Codec,
   getU32Codec,
   getU128Codec,
+  getUnionCodec,
   isFixedSize,
   NumberCodec,
   NumberCodecConfig,
   OptionOrNullable,
+  ReadonlyUint8Array,
   transformCodec,
   unwrapOption,
+  VariableSizeCodec,
 } from "@solana/kit";
 import type { PublicKey } from "@solana/web3.js";
 
@@ -122,12 +130,66 @@ export function getCOptionCodec<TFrom, TTo extends TFrom = TFrom>(
 }
 
 /**
+ * Borsh `String`: u32 LE byte length followed by UTF-8 bytes.
+ *
+ * Unlike Kit's UTF-8 codec, null characters are preserved and invalid UTF-8
+ * is rejected in both directions (lone surrogates on encode, malformed bytes
+ * on decode), matching Rust's `String`.
+ */
+export function getBorshStringCodec(): VariableSizeCodec<string> {
+  const textEncoder = new TextEncoder();
+  const textDecoder = new TextDecoder("utf-8", { fatal: true });
+  return addCodecSizePrefix(
+    transformCodec(
+      getBytesCodec(),
+      (value: string) => {
+        if (!value.isWellFormed()) {
+          throw new Error("Invalid string: contains lone surrogates");
+        }
+        return textEncoder.encode(value);
+      },
+      (bytes) => textDecoder.decode(bytes)
+    ),
+    getU32Codec()
+  );
+}
+
+/**
+ * Borsh `Vec<T>`: u32 LE element count followed by the elements.
+ *
+ * Unlike Kit's array codec, which decodes an empty byte slice as an empty
+ * array, a missing length prefix throws, matching Rust's borsh.
+ */
+export function getVecCodec<TFrom, TTo extends TFrom = TFrom>(
+  item: Codec<TFrom, TTo>
+): VariableSizeCodec<TFrom[], TTo[]> {
+  const prefix = getU32Codec();
+  const array = getArrayCodec(item, { size: prefix });
+  return combineCodec(
+    array,
+    createDecoder({
+      ...(array.maxSize !== undefined ? { maxSize: array.maxSize } : {}),
+      read: (bytes: ReadonlyUint8Array | Uint8Array, offset) => {
+        assertByteArrayHasEnoughBytesForCodec(
+          "vec",
+          prefix.fixedSize,
+          bytes,
+          offset
+        );
+        return array.read(bytes, offset);
+      },
+    })
+  );
+}
+
+/**
  * Borsh enum, preserving the Anchor JS shape: values are single-key objects
  * (`{ variantName: fields }`), with unit variants represented as
  * `{ variantName: {} }`.
  *
- * This is Kit's discriminated union codec with the `__kind` discriminator
- * property mapped to and from the single-key object shape.
+ * Each variant is encoded as its index followed by its fields. The fields
+ * object is handed to the variant codec as is, so field names never clash
+ * with a discriminator property.
  *
  * @param variants     Ordered `[variantName, fieldsCodec]` pairs.
  * @param discriminant Codec for the variant index. Defaults to u8 (borsh);
@@ -135,34 +197,28 @@ export function getCOptionCodec<TFrom, TTo extends TFrom = TFrom>(
  */
 export function getRustEnumCodec(
   variants: [string, IdlCodec][],
-  discriminant?: NumberCodec
+  discriminant: NumberCodec = getU8Codec()
 ): IdlCodec {
-  const variantNames = new Set(variants.map(([name]) => name));
-  const union = getDiscriminatedUnionCodec(
-    variants,
-    discriminant ? { size: discriminant } : {}
-  );
-
-  return transformCodec(
-    union,
-    (value: unknown): { __kind: string } => {
+  const names = variants.map(([name]) => name);
+  return getUnionCodec(
+    variants.map(([name, fields], index) =>
+      transformCodec(
+        getTupleCodec([discriminant, fields]),
+        (value: Record<string, unknown>): [number, unknown] => [
+          index,
+          value[name] ?? {},
+        ],
+        ([, decoded]) => ({ [name]: decoded })
+      )
+    ),
+    (value: unknown) => {
       if (typeof value === "object" && value !== null) {
-        const record = value as Record<string, object | undefined>;
-        for (const key of Object.keys(record)) {
-          if (variantNames.has(key)) {
-            return { __kind: key, ...(record[key] ?? {}) };
-          }
-        }
+        const index = names.findIndex((name) => name in value);
+        if (index >= 0) return index;
       }
       throw new Error(`Invalid enum variant: ${JSON.stringify(value)}`);
     },
-    (value) => {
-      const { __kind, ...fields } = value as { __kind: string } & Record<
-        string,
-        unknown
-      >;
-      return { [__kind]: fields };
-    }
+    (bytes, offset) => Number(discriminant.read(bytes, offset)[0])
   );
 }
 
