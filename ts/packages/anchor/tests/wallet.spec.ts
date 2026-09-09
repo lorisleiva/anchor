@@ -1,3 +1,4 @@
+import * as assert from "assert";
 import { Keypair } from "@solana/web3.js";
 import {
   address,
@@ -8,9 +9,11 @@ import {
   compileTransaction,
   createKeyPairSignerFromBytes,
   createTransactionMessage,
+  isSolanaError,
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  SOLANA_ERROR__KEYS__INVALID_KEY_PAIR_BYTE_LENGTH,
 } from "@solana/kit";
 import { createWallet } from "../src/wallet";
 
@@ -51,8 +54,10 @@ describe("createWallet", () => {
   });
 
   it("rejects secret keys that are not 64 bytes", () => {
-    expect(() => createWallet(new Uint8Array(32))).toThrow(
-      "Expected a 64-byte secret key, got 32 bytes"
+    assert.throws(
+      () => createWallet(new Uint8Array(32)),
+      (error) =>
+        isSolanaError(error, SOLANA_ERROR__KEYS__INVALID_KEY_PAIR_BYTE_LENGTH)
     );
   });
 
