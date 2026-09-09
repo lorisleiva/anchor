@@ -1,5 +1,10 @@
 import * as assert from "assert";
-import { SolanaError } from "@solana/kit";
+import {
+  isSolanaError,
+  SOLANA_ERROR__CODECS__CANNOT_DECODE_EMPTY_BYTE_ARRAY,
+  SOLANA_ERROR__CODECS__INVALID_UTF8_BYTES,
+  SOLANA_ERROR__CODECS__INVALID_UTF8_STRING,
+} from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
 import { BorshCoder, Idl } from "../src";
 
@@ -396,6 +401,15 @@ describe("coder.types", () => {
       () => coder.types.decode("BoolTest", Buffer.from([2])),
       /Invalid bool: 2/
     );
+    // A missing byte is reported by Kit, not as an invalid bool.
+    assert.throws(
+      () => coder.types.decode("BoolTest", Buffer.from([])),
+      (error) =>
+        isSolanaError(
+          error,
+          SOLANA_ERROR__CODECS__CANNOT_DECODE_EMPTY_BYTE_ARRAY
+        )
+    );
   });
 
   test("Throws when decoding an invalid option tag", () => {
@@ -575,13 +589,13 @@ describe("coder.types", () => {
     assert.throws(
       () =>
         coder.types.decode("StringTest", Buffer.from([2, 0, 0, 0, 0xff, 0xfe])),
-      SolanaError
+      (error) => isSolanaError(error, SOLANA_ERROR__CODECS__INVALID_UTF8_BYTES)
     );
 
     // Lone surrogates cannot be represented in a Rust string.
     assert.throws(
       () => coder.types.encode("StringTest", { text: "\ud800" }),
-      /lone surrogate/
+      (error) => isSolanaError(error, SOLANA_ERROR__CODECS__INVALID_UTF8_STRING)
     );
   });
 

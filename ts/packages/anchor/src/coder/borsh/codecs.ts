@@ -50,9 +50,9 @@ export function getBoolCodec(): FixedSizeCodec<boolean, boolean, 1> {
   return combineCodec(
     getBooleanEncoder(),
     tapDecoderBytes(getBooleanDecoder(), (bytes, offset) => {
-      const byte = bytes[offset];
-      if (byte !== 0 && byte !== 1) {
-        throw new Error(`Invalid bool: ${byte}`);
+      // A missing byte falls through to Kit's own bounds check.
+      if (bytes[offset] > 1) {
+        throw new Error(`Invalid bool: ${bytes[offset]}`);
       }
     })
   );
