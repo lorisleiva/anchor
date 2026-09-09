@@ -1,9 +1,6 @@
 import { Buffer } from "buffer";
 import {
-  Address,
-  createKeyPairSignerFromBytes,
-  getBase58Decoder,
-  KeyPairSigner,
+  createLazyKeyPairSignerFromBytes,
   ReadonlyUint8Array,
   TransactionPartialSigner,
 } from "@solana/kit";
@@ -14,35 +11,17 @@ import { isBrowser } from "./utils/common.js";
  * 32-byte private key seed followed by the 32-byte public key, as stored in
  * Solana keypair files and in web3.js `Keypair.secretKey`.
  *
- * Unlike Kit's `createKeyPairSignerFromBytes`, this returns synchronously:
- * the address is derived directly from the public key half of the secret
- * key, and the WebCrypto key import is deferred until the first signature
- * is requested. This keeps synchronous wallet construction possible, which
- * `AnchorProvider.local()`/`env()` and the `getProvider()` fallback rely on
- * (e.g. `setProvider(AnchorProvider.env())` at the top of CommonJS test
- * files, where no top-level await is available).
+ * This is Kit's `createLazyKeyPairSignerFromBytes`: the address is derived
+ * directly from the public key half of the secret key and the WebCrypto key
+ * import is deferred until the first signature is requested, so the wallet
+ * is created synchronously. `AnchorProvider.local()`/`env()` and the
+ * `getProvider()` fallback rely on this (e.g. `setProvider(AnchorProvider.env())`
+ * at the top of CommonJS test files, where no top-level await is available).
  */
 export function createWallet(
   secretKey: ReadonlyUint8Array
 ): TransactionPartialSigner {
-  if (secretKey.length !== 64) {
-    throw new Error(
-      `Expected a 64-byte secret key, got ${secretKey.length} bytes`
-    );
-  }
-  const bytes = Uint8Array.from(secretKey);
-  const address = getBase58Decoder().decode(bytes.slice(32)) as Address;
-
-  let keyPairSigner: Promise<KeyPairSigner> | undefined;
-  const signer: TransactionPartialSigner = {
-    address,
-    async signTransactions(transactions, config) {
-      keyPairSigner ??= createKeyPairSignerFromBytes(bytes);
-      return await (await keyPairSigner).signTransactions(transactions, config);
-    },
-  };
-
-  return signer;
+  return createLazyKeyPairSignerFromBytes(secretKey);
 }
 
 /**
