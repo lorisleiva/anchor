@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import { SolanaError } from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
 import { BorshCoder, Idl } from "../src";
 
@@ -563,15 +564,24 @@ describe("coder.types", () => {
       text: "a\0b",
     });
 
+    // A leading byte order mark is a character like any other.
+    const withBom = coder.types.encode("StringTest", { text: "\ufeffa" });
+    assert.deepStrictEqual([...withBom], [4, 0, 0, 0, 0xef, 0xbb, 0xbf, 97]);
+    assert.deepStrictEqual(coder.types.decode("StringTest", withBom), {
+      text: "\ufeffa",
+    });
+
     // Invalid UTF-8 bytes throw instead of decoding to U+FFFD.
-    assert.throws(() =>
-      coder.types.decode("StringTest", Buffer.from([2, 0, 0, 0, 0xff, 0xfe]))
+    assert.throws(
+      () =>
+        coder.types.decode("StringTest", Buffer.from([2, 0, 0, 0, 0xff, 0xfe])),
+      SolanaError
     );
 
     // Lone surrogates cannot be represented in a Rust string.
     assert.throws(
       () => coder.types.encode("StringTest", { text: "\ud800" }),
-      /lone surrogates/
+      /lone surrogate/
     );
   });
 
