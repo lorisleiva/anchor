@@ -39,7 +39,6 @@ import {
   TransactionSigner,
   TransactionWithLifetime,
 } from "@solana/kit";
-import { Connection, PublicKey } from "@solana/web3.js";
 import { findSolanaError, isBrowser } from "./utils/common.js";
 import { SuccessfulTxSimulationResponse } from "./utils/rpc.js";
 import { createLocalWallet } from "./wallet.js";
@@ -101,15 +100,6 @@ export default interface Provider {
   readonly rpcSubscriptions?: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   /** The signer paying for and co-signing transactions sent by this provider. */
   readonly wallet?: WalletSigner;
-
-  /**
-   * @deprecated Legacy web3.js bridge, consumed by the account and event
-   * namespaces until their own migration to Kit. Requires the provider to
-   * know its cluster URL.
-   */
-  readonly connection: Connection;
-  /** @deprecated Use `wallet.address` instead. */
-  readonly publicKey?: PublicKey;
   /**
    * Default options for sending transactions. Reads default to its
    * `commitment` too, so that an account written at a given commitment can
@@ -142,7 +132,6 @@ export default interface Provider {
 export class AnchorProvider implements Provider {
   readonly rpc: Rpc<SolanaRpcApiMainnet>;
   readonly rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
-  readonly publicKey: PublicKey;
   /**
    * Default confirmation options, completed from {@link defaultOptions} so
    * that partial options (e.g. `{ skipPreflight: true }`) still carry a
@@ -150,8 +139,6 @@ export class AnchorProvider implements Provider {
    */
   readonly opts: ConfirmOptions;
 
-  #url?: string;
-  #connection?: Connection;
   #sendAndConfirmTransaction: ReturnType<
     typeof sendAndConfirmTransactionFactory
   >;
@@ -177,35 +164,15 @@ export class AnchorProvider implements Provider {
         typeof client === "string"
           ? { url: client, websocketUrl: undefined }
           : client;
-      this.#url = url;
       this.rpc = createSolanaRpc(url);
       this.rpcSubscriptions = createSolanaRpcSubscriptions(
         websocketUrl ?? makeWebsocketUrl(url)
       );
     }
-    this.publicKey = new PublicKey(wallet.address);
     this.#sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
       rpc: this.rpc,
       rpcSubscriptions: this.rpcSubscriptions,
     });
-  }
-
-  /**
-   * @deprecated Legacy web3.js bridge, consumed by the account and event
-   * namespaces until their own migration to Kit.
-   */
-  get connection(): Connection {
-    if (!this.#connection) {
-      if (!this.#url) {
-        throw new Error(
-          "The deprecated `connection` bridge is only available when the " +
-            "provider is constructed from cluster endpoints rather than a " +
-            "Kit client."
-        );
-      }
-      this.#connection = new Connection(this.#url, this.opts.commitment);
-    }
-    return this.#connection;
   }
 
   /**
