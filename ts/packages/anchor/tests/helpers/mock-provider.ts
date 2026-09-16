@@ -75,7 +75,8 @@ export function mockProvider(
 
 /**
  * Subscriptions confirming every signature immediately and never reporting
- * a block height exceedence, so that sent transactions confirm.
+ * a block height exceedence or a nonce account change, so that sent
+ * transactions confirm.
  */
 function confirmingSubscriptions(): RpcSubscriptions<SolanaRpcSubscriptionsApi> {
   async function* confirmed() {
@@ -89,6 +90,7 @@ function confirmingSubscriptions(): RpcSubscriptions<SolanaRpcSubscriptionsApi> 
   return {
     signatureNotifications: () => ({ subscribe: async () => confirmed() }),
     slotNotifications: () => ({ subscribe: async () => never }),
+    accountNotifications: () => ({ subscribe: async () => never }),
   } as unknown as RpcSubscriptions<SolanaRpcSubscriptionsApi>;
 }
 
@@ -101,6 +103,24 @@ export function confirmingResponders(): Record<string, Responder> {
     sendTransaction: (request) =>
       signatureBase58(decodeWireTransaction(request).transaction),
   };
+}
+
+/**
+ * Responds to the nonce account lookup Kit's durable nonce confirmation
+ * performs: the requested 32-byte slice holding the nonce value, base58.
+ */
+export function nonceAccountResponse(nonce: string): Responder {
+  return () => ({
+    context: { slot: 1 },
+    value: {
+      data: [nonce, "base58"],
+      executable: false,
+      lamports: 1_500_000,
+      owner: SYSTEM_PROGRAM,
+      rentEpoch: 0,
+      space: 80,
+    },
+  });
 }
 
 export function latestBlockhashResponse() {

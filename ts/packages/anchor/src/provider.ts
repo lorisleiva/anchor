@@ -18,9 +18,11 @@ import {
   isTransactionMessageWithDurableNonceLifetime,
   isTransactionModifyingSigner,
   isTransactionPartialSigner,
+  isTransactionWithDurableNonceLifetime,
   partiallySignTransactionWithSigners,
   Rpc,
   RpcSubscriptions,
+  sendAndConfirmDurableNonceTransactionFactory,
   sendAndConfirmTransactionFactory,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
@@ -31,8 +33,8 @@ import {
   SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED,
   Transaction,
   TransactionMessage,
-  TransactionMessageWithBlockhashLifetime,
   TransactionMessageWithFeePayer,
+  TransactionMessageWithLifetime,
   TransactionMessageWithSigners,
   TransactionModifyingSigner,
   TransactionPartialSigner,
@@ -143,6 +145,9 @@ export class AnchorProvider implements Provider {
   #sendAndConfirmTransaction: ReturnType<
     typeof sendAndConfirmTransactionFactory
   >;
+  #sendAndConfirmDurableNonceTransaction: ReturnType<
+    typeof sendAndConfirmDurableNonceTransactionFactory
+  >;
 
   /**
    * @param client The cluster endpoints to connect to, or a Kit client
@@ -173,6 +178,11 @@ export class AnchorProvider implements Provider {
       rpc: this.rpc,
       rpcSubscriptions: this.rpcSubscriptions,
     });
+    this.#sendAndConfirmDurableNonceTransaction =
+      sendAndConfirmDurableNonceTransactionFactory({
+        rpc: this.rpc,
+        rpcSubscriptions: this.rpcSubscriptions,
+      });
   }
 
   /**
@@ -251,8 +261,11 @@ export class AnchorProvider implements Provider {
    * provider's wallet.
    *
    * The wallet pays the fees unless the message already has a fee payer. A
-   * message without a lifetime is given the latest blockhash; a message with
-   * a blockhash lifetime is sent as is. Durable nonces are not supported.
+   * message without a lifetime is given the latest blockhash. A message
+   * carrying a lifetime is sent as is and confirmed accordingly: until its
+   * blockhash expires, or, for a durable nonce (see Kit's
+   * `setTransactionMessageLifetimeUsingDurableNonce`), until the nonce
+   * account advances.
    *
    * @param message The transaction message to send.
    * @param signers Signers needed on top of those attached to the message.
@@ -267,7 +280,7 @@ export class AnchorProvider implements Provider {
     const commitment = opts.commitment ?? "processed";
     const prepared = this.#prepare(message, signers ?? []);
 
-    if (isTransactionMessageWithBlockhashLifetime(prepared.message)) {
+    if (hasLifetime(prepared.message)) {
       const [signed] = await this.#walletSign([
         await this.#signWithSigners(prepared.message, prepared.signers),
       ]);
@@ -345,8 +358,8 @@ export class AnchorProvider implements Provider {
     for (const { message, signers } of messages) {
       const prepared = this.#prepare(message, signers ?? []);
       let withLifetime: PreparedMessage["message"] &
-        TransactionMessageWithBlockhashLifetime;
-      if (isTransactionMessageWithBlockhashLifetime(prepared.message)) {
+        TransactionMessageWithLifetime;
+      if (hasLifetime(prepared.message)) {
         withLifetime = prepared.message;
       } else {
         lifetime ??= await this.#latestBlockhash(
@@ -394,9 +407,7 @@ export class AnchorProvider implements Provider {
     const sigVerify = !!signers && signers.length > 0;
 
     const prepared = this.#prepare(message, signers ?? []);
-    const withLifetime = isTransactionMessageWithBlockhashLifetime(
-      prepared.message
-    )
+    const withLifetime = hasLifetime(prepared.message)
       ? prepared.message
       : setTransactionMessageLifetimeUsingBlockhash(
           await this.#latestBlockhash(kitCommitment),
@@ -456,12 +467,6 @@ export class AnchorProvider implements Provider {
     message: TransactionMessage,
     extraSigners: TransactionSigner[]
   ): PreparedMessage {
-    if (isTransactionMessageWithDurableNonceLifetime(message)) {
-      throw new Error(
-        "Durable nonce transactions are not supported by the provider."
-      );
-    }
-
     const withFeePayer = hasFeePayer(message)
       ? message
       : setTransactionMessageFeePayer(this.wallet.address, message);
@@ -491,8 +496,7 @@ export class AnchorProvider implements Provider {
    * not part of.
    */
   async #signWithSigners(
-    message: PreparedMessage["message"] &
-      TransactionMessageWithBlockhashLifetime,
+    message: PreparedMessage["message"] & TransactionMessageWithLifetime,
     signers: TransactionSigner[]
   ): Promise<Transaction & TransactionWithLifetime> {
     const transaction = compileTransaction(message);
@@ -591,8 +595,12 @@ export class AnchorProvider implements Provider {
         opts.minContextSlot != null ? BigInt(opts.minContextSlot) : undefined,
     };
     try {
-      assertIsTransactionWithBlockhashLifetime(transaction);
-      await this.#sendAndConfirmTransaction(transaction, config);
+      if (isTransactionWithDurableNonceLifetime(transaction)) {
+        await this.#sendAndConfirmDurableNonceTransaction(transaction, config);
+      } else {
+        assertIsTransactionWithBlockhashLifetime(transaction);
+        await this.#sendAndConfirmTransaction(transaction, config);
+      }
       return signature;
     } catch (err) {
       throw await this.#enrichSendError(err, signature);
@@ -703,6 +711,16 @@ function hasFeePayer(
   message: TransactionMessage
 ): message is TransactionMessage & TransactionMessageWithFeePayer {
   return "feePayer" in message && message.feePayer != null;
+}
+
+/** Whether the message carries a lifetime, blockhash or durable nonce. */
+function hasLifetime<TMessage extends TransactionMessage>(
+  message: TMessage
+): message is TMessage & TransactionMessageWithLifetime {
+  return (
+    isTransactionMessageWithBlockhashLifetime(message) ||
+    isTransactionMessageWithDurableNonceLifetime(message)
+  );
 }
 
 /**

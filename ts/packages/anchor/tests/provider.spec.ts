@@ -2,6 +2,7 @@ import { Keypair } from "@solana/web3.js";
 import {
   addSignersToTransactionMessage,
   Blockhash,
+  getU32Codec,
   Nonce,
   partiallySignTransactionWithSigners,
   setTransactionMessageFeePayer,
@@ -25,6 +26,7 @@ import {
   expectFullySigned,
   latestBlockhashResponse,
   mockProvider,
+  nonceAccountResponse,
   preflightFailureResponse,
   randomAddress,
   randomSigner,
@@ -300,21 +302,41 @@ describe("AnchorProvider", () => {
       expect(requests.map((r) => r.method)).not.toContain("getLatestBlockhash");
     });
 
-    it("rejects durable nonce messages explicitly", async () => {
-      const { provider, wallet } = mockProvider({});
+    it("confirms durable nonce messages through the nonce account", async () => {
+      const nonce = BLOCKHASH as string as Nonce;
+      const nonceAccountAddress = randomAddress();
+      const { provider, wallet, requests } = mockProvider({
+        ...confirmingResponders(),
+        getAccountInfo: nonceAccountResponse(nonce),
+      });
 
       const message = setTransactionMessageLifetimeUsingDurableNonce(
-        {
-          nonce: BLOCKHASH as string as Nonce,
-          nonceAccountAddress: randomAddress(),
-          nonceAuthorityAddress: wallet.address,
-        },
+        { nonce, nonceAccountAddress, nonceAuthorityAddress: wallet.address },
         transferMessage(wallet.address)
       );
+      const signature = await provider.sendAndConfirm(message);
 
-      await expect(provider.sendAndConfirm(message)).rejects.toThrow(
-        "Durable nonce transactions are not supported"
+      // Sent as is: the nonce is the lifetime token and the advance
+      // instruction comes first.
+      const sent = requests.find((r) => r.method === "sendTransaction")!;
+      const { transaction, message: compiled } = decodeWireTransaction(sent);
+      expect(signature).toBe(signatureBase58(transaction));
+      expect(compiled.lifetimeToken).toBe(nonce);
+      if (!("instructions" in compiled)) {
+        throw new Error("Expected a version 0 message");
+      }
+      const [advance] = compiled.instructions;
+      expect(compiled.staticAccounts[advance.programAddressIndex]).toBe(
+        SYSTEM_PROGRAM
       );
+      expect(getU32Codec().decode(advance.data!)).toBe(4);
+
+      // Confirmed by watching the nonce account, not a blockhash expiry.
+      const methods = requests.map((r) => r.method);
+      expect(methods).not.toContain("getLatestBlockhash");
+      expect(methods).not.toContain("getEpochInfo");
+      const lookup = requests.find((r) => r.method === "getAccountInfo")!;
+      expect(lookup.params[0]).toBe(nonceAccountAddress);
     });
 
     it("throws a ProviderError carrying logs on preflight failure", async () => {
@@ -475,6 +497,35 @@ describe("AnchorProvider", () => {
       expect(
         requests.filter((r) => r.method === "getLatestBlockhash")
       ).toHaveLength(1);
+    });
+
+    it("confirms each transaction by its own lifetime", async () => {
+      const nonce = BLOCKHASH as string as Nonce;
+      const nonceAccountAddress = randomAddress();
+      const { provider, wallet, requests } = mockProvider({
+        ...confirmingResponders(),
+        getAccountInfo: nonceAccountResponse(nonce),
+      });
+
+      const durable = setTransactionMessageLifetimeUsingDurableNonce(
+        { nonce, nonceAccountAddress, nonceAuthorityAddress: wallet.address },
+        transferMessage(wallet.address)
+      );
+      const signatures = await provider.sendAll([
+        { message: durable },
+        { message: transferMessage(wallet.address) },
+      ]);
+
+      expect(signatures).toHaveLength(2);
+      const sent = requests
+        .filter((r) => r.method === "sendTransaction")
+        .map((r) => decodeWireTransaction(r).message.lifetimeToken);
+      expect(sent).toEqual([nonce, BLOCKHASH]);
+      // The blockhash is fetched for the second message only; the first is
+      // confirmed through its nonce account.
+      const methods = requests.map((r) => r.method);
+      expect(methods.filter((m) => m === "getLatestBlockhash")).toHaveLength(1);
+      expect(methods.filter((m) => m === "getAccountInfo")).toHaveLength(1);
     });
 
     it("skips the wallet for transactions it does not sign", async () => {
