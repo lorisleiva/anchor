@@ -140,6 +140,21 @@ describe("AnchorProvider", () => {
       expect(provider.rpc).toBeDefined();
       expect(provider.rpcSubscriptions).toBeDefined();
     });
+
+    it("forwards an explicit websocket endpoint to the legacy connection", () => {
+      const wallet = Keypair.generate();
+      const provider = new AnchorProvider(
+        {
+          url: "https://rpc.example.com",
+          websocketUrl: "wss://ws.example.com",
+        },
+        createWallet(wallet.secretKey)
+      );
+      // web3.js keeps the websocket endpoint private; read it back directly.
+      expect((provider.connection as any)._rpcWsEndpoint).toBe(
+        "wss://ws.example.com"
+      );
+    });
   });
 
   describe("simulate", () => {
@@ -368,7 +383,7 @@ describe("AnchorProvider", () => {
       expect(translated.msg).toBe("Custom error");
     });
 
-    it("rejects durable nonce transactions explicitly", async () => {
+    it("rejects transactions carrying nonceInfo rather than mistranslating them", async () => {
       const { provider, wallet } = mockProvider({
         getLatestBlockhash: latestBlockhashResponse,
       });
@@ -383,7 +398,7 @@ describe("AnchorProvider", () => {
       };
 
       await expect(provider.sendAndConfirm(tx)).rejects.toThrow(
-        "Durable nonce transactions are not supported"
+        "Transactions with `nonceInfo` are not supported"
       );
     });
   });

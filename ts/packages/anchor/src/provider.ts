@@ -137,6 +137,7 @@ export class AnchorProvider implements Provider {
   readonly publicKey: PublicKey;
 
   #url?: string;
+  #websocketUrl?: string;
   #connection?: Connection;
   #sendAndConfirmTransaction: ReturnType<
     typeof sendAndConfirmTransactionFactory
@@ -162,10 +163,9 @@ export class AnchorProvider implements Provider {
           ? { url: client, websocketUrl: undefined }
           : client;
       this.#url = url;
+      this.#websocketUrl = websocketUrl ?? makeWebsocketUrl(url);
       this.rpc = createSolanaRpc(url);
-      this.rpcSubscriptions = createSolanaRpcSubscriptions(
-        websocketUrl ?? makeWebsocketUrl(url)
-      );
+      this.rpcSubscriptions = createSolanaRpcSubscriptions(this.#websocketUrl);
     }
     this.publicKey = new PublicKey(wallet.address);
     this.#sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
@@ -187,7 +187,10 @@ export class AnchorProvider implements Provider {
             "Kit client."
         );
       }
-      this.#connection = new Connection(this.#url, this.opts.commitment);
+      this.#connection = new Connection(this.#url, {
+        commitment: this.opts.commitment,
+        wsEndpoint: this.#websocketUrl,
+      });
     }
     return this.#connection;
   }
@@ -508,9 +511,16 @@ export class AnchorProvider implements Provider {
     lifetime: Readonly<{ blockhash: Blockhash; lastValidBlockHeight: bigint }>,
     { walletSigns = true }: { walletSigns?: boolean } = {}
   ) {
+    // The message is rebuilt from `instructions` and `recentBlockhash`,
+    // whereas web3.js would compile a `nonceInfo` transaction with the nonce
+    // as its blockhash and the advance instruction prepended. Refuse rather
+    // than silently send a different transaction. Legacy transactions built
+    // that way by hand, and versioned transactions, are forwarded as is.
     if (tx.nonceInfo) {
       throw new Error(
-        "Durable nonce transactions are not supported by the provider yet."
+        "Transactions with `nonceInfo` are not supported by the provider. " +
+          "Set the nonce as `recentBlockhash` and add the advance nonce " +
+          "instruction first, or use a versioned transaction."
       );
     }
 
