@@ -1,4 +1,5 @@
 import {
+  ConfirmOptions,
   Keypair,
   PublicKey,
   SystemProgram,
@@ -28,7 +29,10 @@ type Responder = (request: RpcRequest) => unknown;
  * to functions returning the JSON-RPC `result` (or `{ error }` envelopes),
  * and every request is recorded in `requests`.
  */
-function mockProvider(responders: Record<string, Responder>) {
+function mockProvider(
+  responders: Record<string, Responder>,
+  opts?: ConfirmOptions
+) {
   const wallet = Keypair.generate();
   const requests: RpcRequest[] = [];
   const transport: RpcTransport = async ({ payload }) => {
@@ -49,7 +53,8 @@ function mockProvider(responders: Record<string, Responder>) {
       rpc: createSolanaRpcFromTransport(transport),
       rpcSubscriptions: {} as any,
     } as SolanaClient,
-    createWallet(wallet.secretKey)
+    createWallet(wallet.secretKey),
+    opts
   );
   return { provider, wallet, requests };
 }
@@ -318,6 +323,38 @@ describe("AnchorProvider", () => {
       expect(
         requests.filter((r) => r.method === "sendTransaction")
       ).toHaveLength(1);
+    });
+
+    it("falls back to the provider options for unset per-call options", async () => {
+      const { provider, wallet, requests } = mockProvider(
+        {
+          getLatestBlockhash: latestBlockhashResponse,
+          sendTransaction: (request) =>
+            preflightFailureResponse(request, {
+              InstructionError: [0, { Custom: 6000 }],
+            }),
+        },
+        { commitment: "confirmed", preflightCommitment: "confirmed" }
+      );
+
+      // Only `skipPreflight` is given: the commitments come from the provider
+      // rather than the library default (`processed` at this point).
+      const promise = provider.sendAndConfirm(
+        transferTransaction(wallet.publicKey),
+        undefined,
+        { skipPreflight: true }
+      );
+      await expect(promise).rejects.toThrow("Custom program error: #6000");
+
+      const blockhash = requests.find(
+        (r) => r.method === "getLatestBlockhash"
+      )!;
+      expect(blockhash.params[0]).toEqual({ commitment: "confirmed" });
+      const send = requests.find((r) => r.method === "sendTransaction")!;
+      expect(send.params[1]).toMatchObject({
+        skipPreflight: true,
+        preflightCommitment: "confirmed",
+      });
     });
 
     it("refreshes the blockhash and retries when already processed", async () => {

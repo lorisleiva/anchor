@@ -257,9 +257,7 @@ export class AnchorProvider implements Provider {
     signers?: Signer[],
     opts?: ConfirmOptionsWithBlockhash
   ): Promise<TransactionSignature> {
-    if (opts === undefined) {
-      opts = this.opts;
-    }
+    opts = { ...this.opts, ...opts };
     const commitment = toCommitment(opts.commitment) ?? "processed";
 
     if (isVersionedTransaction(tx)) {
@@ -357,9 +355,7 @@ export class AnchorProvider implements Provider {
     }[],
     opts?: ConfirmOptions
   ): Promise<Array<TransactionSignature>> {
-    if (opts === undefined) {
-      opts = this.opts;
-    }
+    opts = { ...this.opts, ...opts };
     const commitment = toCommitment(opts.commitment) ?? "processed";
     const lifetime = (
       await this.rpc
