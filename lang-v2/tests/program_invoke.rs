@@ -1,6 +1,9 @@
 //! Run: `cargo test -p anchor-lang --features testing --test program_invoke`
 
+extern crate alloc;
+
 use {
+    alloc::boxed::Box,
     anchor_lang::{
         accounts::Account,
         prelude::BorshAccount,
@@ -9,10 +12,12 @@ use {
             program,
         },
         testing::{AccountBuffer, MIN_ACCOUNT_BUF},
-        Address, AnchorAccount, AnchorDeserialize, AnchorSerialize, CpiContext, CpiHandle,
-        CpiHandleMut, Discriminator, Owner, ToCpiAccounts, ToCpiHandle, ToCpiHandleMut,
+        unchecked_invoke_signed_fixed, Address, AnchorAccount, AnchorDeserialize, AnchorSerialize,
+        CpiContext, CpiHandle, CpiHandleMut, Discriminator, Owner, ToCpiAccounts, ToCpiHandle,
+        ToCpiHandleMut,
     },
     bytemuck::{Pod, Zeroable},
+    pinocchio::instruction::InstructionAccount,
     solana_program_error::ProgramError,
 };
 
@@ -323,6 +328,51 @@ fn checked_invoke_rejects_readonly_handle_for_writable_meta() {
 }
 
 #[test]
+fn fixed_invoke_rejects_readonly_handle_for_writable_meta() {
+    let buffer = account_view([1; 32], true);
+    let view = unsafe { buffer.view() };
+    let handle = CpiHandle::readonly(&view);
+    let metas = [InstructionAccount::new(handle.address(), true, false)];
+
+    let err = unchecked_invoke_signed_fixed(&ID, &[], &metas, &[handle], &[]).unwrap_err();
+
+    assert_eq!(err, ProgramError::InvalidArgument);
+}
+
+#[test]
+fn fixed_invoke_rejects_address_mismatch() {
+    let buffer = account_view([1; 32], false);
+    let view = unsafe { buffer.view() };
+    let handle = CpiHandle::readonly(&view);
+    let other = Address::new_from_array([2; 32]);
+    let metas = [InstructionAccount::new(&other, false, false)];
+
+    let err = unchecked_invoke_signed_fixed(&ID, &[], &metas, &[handle], &[]).unwrap_err();
+
+    assert_eq!(err, ProgramError::InvalidArgument);
+}
+
+#[test]
+fn fixed_invoke_accepts_matching_readonly_handle() {
+    let buffer = account_view([1; 32], false);
+    let view = unsafe { buffer.view() };
+    let handle = CpiHandle::readonly(&view);
+    let metas = [InstructionAccount::new(handle.address(), false, false)];
+
+    unchecked_invoke_signed_fixed(&ID, &[], &metas, &[handle], &[]).unwrap();
+}
+
+#[test]
+fn fixed_invoke_accepts_matching_writable_handle() {
+    let buffer = account_view([1; 32], true);
+    let mut view = unsafe { buffer.view() };
+    let handle = CpiHandleMut::writable(&mut view);
+    let metas = [InstructionAccount::new(handle.address(), true, false)];
+
+    unchecked_invoke_signed_fixed(&ID, &[], &metas, &[handle.into()], &[]).unwrap();
+}
+
+#[test]
 fn checked_invoke_rejects_nonsigner_handle_for_signer_meta() {
     let buffer = account_view([1; 32], false);
     let view = unsafe { buffer.view() };
@@ -541,6 +591,42 @@ fn cpi_context_invoke_accepts_readonly_slab_handle_from_mutable_wrapper() {
 }
 
 #[test]
+fn cpi_context_invoke_accepts_mutable_boxed_slab_handle() {
+    let program = ID;
+    let buffer = slab_account_view([1; 32], true, 9);
+    let view = unsafe { buffer.view() };
+    let mut acct = unsafe {
+        <Box<Account<PodCounter>> as AnchorAccount>::load_mut(view)
+    }
+    .unwrap();
+    let accounts = WritableCpi {
+        account: acct.cpi_handle_mut(),
+    };
+
+    CpiContext::new(&program, accounts)
+        .invoke(&[1, 2, 3])
+        .unwrap();
+}
+
+#[test]
+fn cpi_context_invoke_accepts_readonly_boxed_slab_handle_from_mutable_wrapper() {
+    let program = ID;
+    let buffer = slab_account_view([1; 32], true, 9);
+    let view = unsafe { buffer.view() };
+    let acct = unsafe {
+        <Box<Account<PodCounter>> as AnchorAccount>::load_mut(view)
+    }
+    .unwrap();
+    let accounts = ReadonlyCpi {
+        account: acct.cpi_handle(),
+    };
+
+    CpiContext::new(&program, accounts)
+        .invoke(&[1, 2, 3])
+        .unwrap();
+}
+
+#[test]
 fn invoke_ix_rejects_live_borrow_for_writable_meta() {
     let program = ID;
     let buffer = account_view([1; 32], true);
@@ -620,6 +706,30 @@ fn cpi_context_invoke_accepts_mutable_borsh_handle() {
 
     acct.reacquire_borrow_mut().unwrap();
     acct.value = 11;
+    assert_eq!(acct.value, 11);
+}
+
+#[test]
+fn cpi_context_invoke_accepts_mutable_boxed_borsh_handle() {
+    let program = ID;
+    let buffer = borsh_account_view([1; 32], true, 9);
+    let view = unsafe { buffer.view() };
+    let mut acct = unsafe {
+        <Box<BorshAccount<BorshCounter>> as AnchorAccount>::load_mut(view)
+    }
+    .unwrap();
+    acct.value = 11;
+
+    {
+        let accounts = WritableCpi {
+            account: acct.cpi_handle_mut(),
+        };
+        CpiContext::new(&program, accounts)
+            .invoke(&[1, 2, 3])
+            .unwrap();
+    }
+
+    acct.reacquire_borrow_mut().unwrap();
     assert_eq!(acct.value, 11);
 }
 

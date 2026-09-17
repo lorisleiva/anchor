@@ -481,6 +481,41 @@ pub enum MyError {
     miri,
     ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
 )]
+fn malformed_error_code_msg_is_rejected() {
+    compile_fail_case(
+        "malformed_error_code_msg",
+        r#"
+use anchor_lang::prelude::*;
+
+#[error_code]
+pub enum BadMsg {
+    #[msg = "oops"]
+    NameValue,
+    #[msg]
+    Path,
+    #[msg("a", "b")]
+    Multi,
+    #[msg(SOME_CONST)]
+    Ident,
+    #[msg(1)]
+    Int,
+    #[msg("a")]
+    #[msg("b")]
+    Duplicate,
+}
+"#,
+        &[
+            r#"expected `#[msg("...")]`"#,
+            "duplicate `#[msg]` attribute",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
 fn instruction_args_must_match_zero_arg_handler() {
     compile_fail_case(
         "instruction_args_without_handler_args",
@@ -715,6 +750,46 @@ pub mod gated_program {
 #[derive(Accounts)]
 pub struct Noop {}
 "#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn cfg_gated_discriminator_validation() {
+    compile_fail_case(
+        "cfg_gated_discriminator_collision",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[program]
+pub mod collision_program {
+    use super::*;
+
+    #[cfg(unix)]
+    pub fn protected(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[discrim = 214]
+    pub fn decoy(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(any())]
+    pub fn disabled(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Noop {}
+"#,
+        &["instruction `protected` is missing `#[discrim = N]`"],
     );
 }
 

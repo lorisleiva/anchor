@@ -30,7 +30,13 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut errors = Vec::new();
     let mut idl_entry_pushes = Vec::new();
     for variant in item.variants.iter_mut() {
-        let message = extract_msg(&variant.attrs);
+        let message = match extract_msg(&variant.attrs) {
+            Ok(message) => message,
+            Err(err) => {
+                errors.push(err.to_compile_error());
+                None
+            }
+        };
         // Strip used `msg` attribute
         variant.attrs.retain(|a| !a.path().is_ident("msg"));
         if let Some((_, discr)) = &variant.discriminant {
@@ -44,16 +50,15 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         }
         let variant_ident = variant.ident.clone();
         let cfg_attrs = crate::cfg_attrs(&variant.attrs);
-        let escaped_name = escape_json(&variant.ident.to_string());
-        let suffix = match message {
-            Some(message) => {
-                format!(
-                    ",\"name\":\"{}\",\"msg\":\"{}\"}}",
-                    escaped_name,
-                    escape_json(&message),
+        let variant_name = variant.ident.to_string();
+        let msg_field = match message {
+            Some(message) => quote! {
+                anchor_lang::__alloc::format!(
+                    ",\"msg\":{}",
+                    anchor_lang::idl_build::__idl_json_string(#message),
                 )
-            }
-            None => format!(",\"name\":\"{}\"}}", escaped_name),
+            },
+            None => quote! { "" },
         };
         idl_entry_pushes.push(quote! {
             #(#cfg_attrs)*
@@ -62,9 +67,10 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                     .checked_add(#offset)
                     .expect("error code overflowed");
                 __parts.push(anchor_lang::__alloc::format!(
-                    "{{\"code\":{}{}",
+                    "{{\"code\":{},\"name\":{}{}}}",
                     __code,
-                    #suffix,
+                    anchor_lang::idl_build::__idl_json_string(#variant_name),
+                    #msg_field,
                 ));
             }
         });
@@ -169,28 +175,36 @@ fn parse_discrim(discrim: &Expr) -> Option<u32> {
     }
 }
 
-fn extract_msg(attrs: &[Attribute]) -> Option<String> {
-    attrs.iter().find_map(|a| {
-        if !a.path().is_ident("msg") {
-            return None;
+fn extract_msg(attrs: &[Attribute]) -> syn::Result<Option<String>> {
+    let mut message = None;
+    for attr in attrs {
+        if !attr.path().is_ident("msg") {
+            continue;
         }
-        // `#[msg("text")]` parses as a list-style attribute.
-        match &a.meta {
-            Meta::List(list) => {
-                let lit: Lit = syn::parse2(list.tokens.clone()).ok()?;
-                if let Lit::Str(s) = lit {
-                    Some(s.value())
-                } else {
-                    None
-                }
+        let list = match &attr.meta {
+            Meta::List(list) => list,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    r#"expected `#[msg("...")]`"#,
+                ));
             }
-            _ => None,
+        };
+        let lit: Lit = syn::parse2(list.tokens.clone()).map_err(|_| {
+            syn::Error::new_spanned(attr, r#"expected `#[msg("...")]`"#)
+        })?;
+        let Lit::Str(s) = lit else {
+            return Err(syn::Error::new_spanned(
+                attr,
+                r#"expected `#[msg("...")]`"#,
+            ));
+        };
+        if message.is_some() {
+            return Err(syn::Error::new_spanned(attr, "duplicate `#[msg]` attribute"));
         }
-    })
-}
-
-fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+        message = Some(s.value());
+    }
+    Ok(message)
 }
 
 #[cfg(test)]
@@ -222,6 +236,127 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("`offset` must be a u32 integer literal"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn variant_attrs(tokens: TokenStream2) -> Vec<Attribute> {
+        let item: ItemEnum = syn::parse2(tokens).expect("enum should parse");
+        item.variants
+            .into_iter()
+            .next()
+            .expect("enum should have a variant")
+            .attrs
+    }
+
+    #[test]
+    fn extract_msg_accepts_string_literal() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg("boom")]
+                A,
+            }
+        });
+        assert_eq!(extract_msg(&attrs).unwrap(), Some("boom".into()));
+    }
+
+    #[test]
+    fn extract_msg_accepts_missing_msg() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                A,
+            }
+        });
+        assert_eq!(extract_msg(&attrs).unwrap(), None);
+    }
+
+    #[test]
+    fn extract_msg_rejects_name_value() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg = "oops"]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains(r#"expected `#[msg("...")]`"#),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_msg_rejects_path_form() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains(r#"expected `#[msg("...")]`"#),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_msg_rejects_multiple_arguments() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg("a", "b")]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains(r#"expected `#[msg("...")]`"#),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_msg_rejects_identifier() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg(SOME_CONST)]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains(r#"expected `#[msg("...")]`"#),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_msg_rejects_integer_literal() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg(1)]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains(r#"expected `#[msg("...")]`"#),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_msg_rejects_duplicate() {
+        let attrs = variant_attrs(quote! {
+            enum E {
+                #[msg("a")]
+                #[msg("b")]
+                A,
+            }
+        });
+        let err = extract_msg(&attrs).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate `#[msg]` attribute"),
             "unexpected error: {err}"
         );
     }
