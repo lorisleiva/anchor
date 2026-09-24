@@ -2,6 +2,7 @@ import { Buffer } from "buffer";
 import {
   Account,
   Address as KitAddress,
+  Base58EncodedBytes,
   Commitment,
   createDecoder,
   DataPublisher,
@@ -290,13 +291,32 @@ export class AccountClient<
     filters?: AccountFilters,
     config: FetchAccountConfig = {}
   ): Promise<Account<T>[]> {
-    const memcmp: { offset: number; bytes: string } =
+    // Coders describe their accounts with a memcmp filter (offset + bytes),
+    // a data size, or both; the system coder, for instance, only knows the
+    // size of a nonce account.
+    const coderFilter: { offset?: number; bytes?: string; dataSize?: number } =
       this._coder.accounts.memcmp(
         this._idlAccount.name,
         filters && !Array.isArray(filters)
           ? Buffer.from(filters as ReadonlyUint8Array)
           : undefined
       );
+    const coderFilters: (
+      | GetProgramAccountsMemcmpFilter
+      | GetProgramAccountsDatasizeFilter
+    )[] = [];
+    if (coderFilter.offset != undefined && coderFilter.bytes != undefined) {
+      coderFilters.push({
+        memcmp: {
+          offset: BigInt(coderFilter.offset),
+          bytes: coderFilter.bytes as Base58EncodedBytes,
+          encoding: "base58",
+        },
+      });
+    }
+    if (coderFilter.dataSize != undefined) {
+      coderFilters.push({ dataSize: BigInt(coderFilter.dataSize) });
+    }
     const { abortSignal, ...rpcConfig } = withProviderDefaults(
       this._provider,
       config
@@ -305,17 +325,7 @@ export class AccountClient<
       .getProgramAccounts(this._programAddress, {
         ...rpcConfig,
         encoding: "base64",
-        filters: [
-          {
-            memcmp: {
-              offset: BigInt(memcmp.offset),
-              bytes:
-                memcmp.bytes as GetProgramAccountsMemcmpFilter["memcmp"]["bytes"],
-              encoding: "base58",
-            },
-          },
-          ...(Array.isArray(filters) ? filters : []),
-        ],
+        filters: [...coderFilters, ...(Array.isArray(filters) ? filters : [])],
       })
       .send({ abortSignal });
 
@@ -404,7 +414,10 @@ export class AccountClient<
     }
     const space = BigInt(sizeOverride ?? this.size);
     const lamports = await this._provider.rpc
-      .getMinimumBalanceForRentExemption(space)
+      .getMinimumBalanceForRentExemption(
+        space,
+        withProviderDefaults(this._provider)
+      )
       .send();
     return getCreateAccountInstruction({
       payer: wallet,

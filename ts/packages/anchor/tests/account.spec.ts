@@ -9,7 +9,7 @@ import {
   isSolanaError,
   SOLANA_ERROR__ACCOUNTS__FAILED_TO_DECODE_ACCOUNT,
 } from "@solana/kit";
-import { Idl, Program, Provider } from "../src";
+import { BorshCoder, Coder, Idl, Program, Provider } from "../src";
 import {
   mockProvider,
   randomAddress,
@@ -385,6 +385,34 @@ describe("AccountClient", () => {
       // "finalized" is the server default, which Kit omits.
       expect(config.commitment).toBeUndefined();
     });
+
+    it("translates size-only and combined coder filters", async () => {
+      // Coders may describe an account by size alone (e.g. the system
+      // coder's nonce account) or by size and prefix bytes.
+      async function filtersFor(memcmp: () => unknown) {
+        const { provider, requests } = mockProvider({
+          getProgramAccounts: () => [],
+        });
+        const coder: Coder = new BorshCoder(idl);
+        (coder.accounts as any).memcmp = memcmp;
+        const program = new Program<CounterIdl>(idl, provider, coder);
+        await program.account.counter.all();
+        const request = requests.find(
+          (r) => r.method === "getProgramAccounts"
+        )!;
+        return (request.params[1] as any).filters;
+      }
+
+      expect(await filtersFor(() => ({ dataSize: 80 }))).toEqual([
+        { dataSize: 80n },
+      ]);
+      expect(
+        await filtersFor(() => ({ offset: 0, bytes: "abc", dataSize: 80 }))
+      ).toEqual([
+        { memcmp: { offset: 0n, bytes: "abc", encoding: "base58" } },
+        { dataSize: 80n },
+      ]);
+    });
   });
 
   describe("subscribe", () => {
@@ -526,6 +554,8 @@ describe("AccountClient", () => {
         (r) => r.method === "getMinimumBalanceForRentExemption"
       )!;
       expect(rent.params[0]).toBe(16n);
+      // Read at the provider commitment like every other read.
+      expect(rent.params[1]).toEqual({ commitment: "confirmed" });
       expect(instruction.programAddress).toBe(SYSTEM_PROGRAM);
       expect(instruction.accounts).toMatchObject([
         {
