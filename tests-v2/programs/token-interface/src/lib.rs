@@ -95,11 +95,25 @@ pub mod token_interface_test {
     ) -> Result<()> {
         Ok(())
     }
+
+    #[discrim = 11]
+    pub fn init_interface_mint_with_space(
+        _ctx: &mut Context<InitInterfaceMintWithSpace>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[discrim = 12]
+    pub fn init_interface_mint_too_small(
+        _ctx: &mut Context<InitInterfaceMintTooSmall>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
 pub struct CheckTokenProgram {
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -107,7 +121,7 @@ pub struct InitInterfaceMint {
     #[account(mut)]
     pub payer: Signer,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -124,7 +138,7 @@ pub struct InitInterfaceMintPda {
     #[account(mut)]
     pub payer: Signer,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -144,7 +158,7 @@ pub struct InitInterfaceTokenAccount {
     pub payer: Signer,
     pub mint: InterfaceAccount<Mint>,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -162,7 +176,7 @@ pub struct InitInterfaceTokenAccountPda {
     pub payer: Signer,
     pub mint: InterfaceAccount<Mint>,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -184,7 +198,7 @@ pub struct InitInterfaceTokenAccountPda {
 pub struct CheckInterfaceTokenConstraints {
     pub mint: InterfaceAccount<Mint>,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         token::mint = mint,
         token::authority = authority,
@@ -196,7 +210,7 @@ pub struct CheckInterfaceTokenConstraints {
 #[derive(Accounts)]
 pub struct CheckInterfaceMintConstraints {
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         mint::decimals = 6,
         mint::authority = authority,
@@ -212,7 +226,7 @@ pub struct MintToInterfaceAccount {
     #[account(mut, token::mint = mint, token::token_program = token_program)]
     pub to: InterfaceAccount<TokenAccount>,
     pub authority: Signer,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -220,7 +234,7 @@ pub struct InitInterfaceMintDecimals9 {
     #[account(mut)]
     pub payer: Signer,
     pub authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -238,7 +252,7 @@ pub struct InitInterfaceMintWithFreezeAuthority {
     pub payer: Signer,
     pub authority: UncheckedAccount,
     pub freeze_authority: UncheckedAccount,
-    pub token_program: Interface<'static, TokenInterface>,
+    pub token_program: Interface<TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -256,4 +270,40 @@ pub struct CheckInterfaceMintFreezeAuthority {
     pub expected: UncheckedAccount,
     #[account(mint::freeze_authority = expected)]
     pub mint: InterfaceAccount<Mint>,
+}
+
+#[derive(Accounts)]
+pub struct InitInterfaceMintWithSpace {
+    #[account(mut)]
+    pub payer: Signer,
+    pub authority: UncheckedAccount,
+    pub token_program: Interface<TokenInterface>,
+    #[account(
+        init,
+        payer = payer,
+        space = 200,
+        mint::decimals = 6,
+        mint::authority = authority,
+        mint::token_program = token_program,
+    )]
+    pub mint: InterfaceAccount<Mint>,
+    pub system_program: Program<System>,
+}
+
+#[derive(Accounts)]
+pub struct InitInterfaceMintTooSmall {
+    #[account(mut)]
+    pub payer: Signer,
+    pub authority: UncheckedAccount,
+    pub token_program: Interface<TokenInterface>,
+    #[account(
+        init,
+        payer = payer,
+        space = 81,
+        mint::decimals = 6,
+        mint::authority = authority,
+        mint::token_program = token_program,
+    )]
+    pub mint: InterfaceAccount<Mint>,
+    pub system_program: Program<System>,
 }

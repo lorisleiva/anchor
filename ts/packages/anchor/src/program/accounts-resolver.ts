@@ -1,4 +1,6 @@
 import BN from "bn.js";
+import { Buffer } from "buffer";
+import { fetchEncodedAccount } from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
 import {
   Idl,
@@ -17,10 +19,10 @@ import {
 } from "../idl.js";
 import { AllInstructions } from "./namespace/types.js";
 import Provider from "../provider.js";
-import { AccountNamespace } from "./namespace/account.js";
-import { BorshAccountsCoder } from "src/coder/index.js";
+import { AccountsCoder, BorshAccountsCoder } from "../coder/index.js";
 import { decodeTokenAccount } from "./token-account-layout";
-import { Address, Program, translateAddress } from "./index.js";
+import { withProviderDefaults } from "../utils/common.js";
+import { Address, Program, toAddress, translateAddress } from "./index.js";
 import {
   PartialAccounts,
   flattenPartialAccounts,
@@ -51,7 +53,7 @@ export type CustomAccountResolver<IDL extends Idl> = (params: {
 
 // Populates a given accounts context with PDAs and common missing accounts.
 export class AccountsResolver<IDL extends Idl> {
-  private _accountStore: AccountStore<IDL>;
+  private _accountStore: AccountStore;
 
   constructor(
     private _args: any[],
@@ -59,15 +61,11 @@ export class AccountsResolver<IDL extends Idl> {
     private _provider: Provider,
     private _programId: PublicKey,
     private _idlIx: AllInstructions<IDL>,
-    accountNamespace: AccountNamespace<IDL>,
+    accountsCoder: AccountsCoder,
     private _idlTypes: IdlTypeDef[],
     private _customResolver?: CustomAccountResolver<IDL>
   ) {
-    this._accountStore = new AccountStore(
-      _provider,
-      accountNamespace,
-      _programId
-    );
+    this._accountStore = new AccountStore(_provider, accountsCoder, _programId);
   }
 
   public args(args: Array<any>): void {
@@ -281,14 +279,17 @@ export class AccountsResolver<IDL extends Idl> {
         const account = accountOrAccounts;
 
         if ((account.signer || account.address) && !this.get([...path, name])) {
-          // Default signers to the provider
+          // Default signers to the provider's wallet
           if (account.signer) {
-            if (!this._provider.publicKey) {
+            if (!this._provider.wallet) {
               throw new Error(
-                "This function requires the `Provider` interface implementor to have a `publicKey` field."
+                "This function requires the `Provider` interface implementor to have a `wallet` field."
               );
             }
-            this.set([...path, name], this._provider.publicKey);
+            this.set(
+              [...path, name],
+              translateAddress(this._provider.wallet.address)
+            );
           }
 
           // Set based on `address` field
@@ -540,16 +541,16 @@ export class AccountsResolver<IDL extends Idl> {
 }
 
 // TODO: this should be configurable to avoid unnecessary requests.
-class AccountStore<IDL extends Idl> {
+class AccountStore {
   private _cache = new Map<string, any>();
-  private _idls: Record<string, AccountNamespace<any>> = {};
+  private _coders: Record<string, AccountsCoder> = {};
 
   constructor(
     private _provider: Provider,
-    accounts: AccountNamespace<IDL>,
+    accountsCoder: AccountsCoder,
     programId: PublicKey
   ) {
-    this._idls[programId.toBase58()] = accounts;
+    this._coders[programId.toBase58()] = accountsCoder;
   }
 
   public async fetchAccount<T = any>({
@@ -562,26 +563,26 @@ class AccountStore<IDL extends Idl> {
   }): Promise<T> {
     const address = publicKey.toBase58();
     if (!this._cache.has(address)) {
-      const accountInfo = await this._provider.connection.getAccountInfo(
-        publicKey
+      const accountInfo = await fetchEncodedAccount(
+        this._provider.rpc,
+        toAddress(publicKey),
+        withProviderDefaults(this._provider)
       );
-      if (accountInfo === null) {
+      if (!accountInfo.exists) {
         throw new Error(`Account not found: ${address}`);
       }
+      const data = Buffer.from(accountInfo.data);
 
       if (name === "tokenAccount") {
-        const account = decodeTokenAccount(accountInfo.data);
+        const account = decodeTokenAccount(data);
         this._cache.set(address, account);
       } else {
-        const accounts = await this.getAccountsNs(accountInfo.owner);
-        if (accounts) {
-          const accountNs = Object.values(accounts)[0] as any;
-          if (accountNs) {
-            const account = (
-              accountNs.coder.accounts as BorshAccountsCoder
-            ).decodeAny(accountInfo.data);
-            this._cache.set(address, account);
-          }
+        const coder = await this.getAccountsCoder(
+          translateAddress(accountInfo.programAddress)
+        );
+        if (coder) {
+          const account = (coder as BorshAccountsCoder).decodeAny(data);
+          this._cache.set(address, account);
         }
       }
     }
@@ -589,18 +590,18 @@ class AccountStore<IDL extends Idl> {
     return this._cache.get(address);
   }
 
-  private async getAccountsNs(
+  private async getAccountsCoder(
     programId: PublicKey
-  ): Promise<AccountNamespace<any> | undefined> {
+  ): Promise<AccountsCoder | undefined> {
     const programIdStr = programId.toBase58();
-    if (!this._idls[programIdStr]) {
+    if (!this._coders[programIdStr]) {
       const idl = await Program.fetchIdl(programId, this._provider);
       if (idl) {
         const program = new Program(idl, this._provider);
-        this._idls[programIdStr] = program.account;
+        this._coders[programIdStr] = program.coder.accounts;
       }
     }
 
-    return this._idls[programIdStr];
+    return this._coders[programIdStr];
   }
 }

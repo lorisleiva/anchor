@@ -81,7 +81,7 @@ Here are some examples of optimizations present in Anchor v2.
 
 - **PDA bumps precomputed at macro time.** If your seeds are all literals, the derive runs the PDA search during compilation and bakes the canonical bump in as a `const`. This lets us skip the runtime PDA search entirely.
 - **Skip the on-curve check for program-owned PDAs.** If the program already owns the account, it had to be created via signed CPI — which did the curve check at the time. Verification can just hash-and-compare. Saves ~1,000 CU per verify.
-- **Wincode events by default.** `#[event]` automatically derives Anchor's Wincode-backed serialization, so programs do not need a direct Wincode dependency. It still handles `Vec` / `String` / `Option` / enums and is 3–10× cheaper than borsh on SBF.
+- **Wincode events by default.** `#[event]` automatically derives `AnchorSerialize` and `AnchorDeserialize`, so programs do not need a direct Wincode dependency. It still handles `Vec` / `String` / `Option` / enums and is 3–10× cheaper than borsh on SBF.
 - **`#[event(bytemuck)]` for fixed-size events.** The struct's `repr(C)` Pod layout already matches the wire format, so emitting is just disc + one memcpy of the body. No per-field encoding, with compile-time rejection of padded layouts.
 - **Alignment-1 Pod wrappers** (`PodU64`, `PodI128`, `PodBool`, ...). Integers stored as `[u8; N]` so the whole `#[account]` struct casts directly from the account's raw bytes. Zero deserialization.
 - **`PodVec<T, MAX>`**: fixed-capacity vec with a `u16` length, stored inline in the account. Variable-length data without heap allocation.
@@ -125,6 +125,28 @@ let metas = multisig_v2::accounts::CreateResolved { creator: creator.pubkey() }
 ```
 
 In v1, the caller built the `AccountMeta` vector by hand on every call — deriving the PDA, wiring up `system_program`, and keeping the order in sync with the handler's `#[derive(Accounts)]`.
+
+## Interface programs
+
+`#[program(interface, program_id = X)]` generates client and CPI bindings for someone else's program. `#[derive(Accounts)]` still defaults optional-account `None` sentinels and PDA derivation to `crate::ID`. If `X` is not this crate's ID, stamp the Accounts structs so those values match the callee:
+
+```rust
+#[derive(Accounts)]
+#[accounts_program_id(declared::ID)]
+pub struct Foo {
+    pub optional: Option<UncheckedAccount>,
+}
+
+#[program(interface, program_id = declared::ID)]
+pub mod foo_interface {
+    use super::*;
+    pub fn ix(_ctx: &mut Context<Foo>) -> Result<()> {
+        unreachable!()
+    }
+}
+```
+
+v2 emits a compile error when the two IDs disagree.
 
 ## Extensibility
 

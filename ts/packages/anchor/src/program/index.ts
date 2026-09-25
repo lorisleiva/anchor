@@ -1,5 +1,6 @@
 import { Buffer } from "buffer";
-import { Commitment, PublicKey } from "@solana/web3.js";
+import { fetchEncodedAccount, Signature, Slot } from "@solana/kit";
+import { PublicKey } from "@solana/web3.js";
 import { BorshCoder, Coder } from "../coder/index.js";
 import {
   Idl,
@@ -10,8 +11,9 @@ import {
 } from "../idl.js";
 import Provider, { getProvider } from "../provider.js";
 import { CustomAccountResolver } from "./accounts-resolver.js";
-import { Address, translateAddress } from "./common.js";
-import { EventManager } from "./event.js";
+import { Address, toAddress, translateAddress } from "./common.js";
+import { EventListenerOptions, EventManager } from "./event.js";
+import { withProviderDefaults } from "../utils/common.js";
 import NamespaceFactory, {
   AccountNamespace,
   IdlEvents,
@@ -57,7 +59,7 @@ export * from "./namespace/index.js";
 export class Program<IDL extends Idl = Idl> {
   /**
    * Async methods to send signed transactions to *non*-state methods on the
-   * program, returning a [[TransactionSignature]].
+   * program, returning the transaction signature.
    *
    * ## Usage
    *
@@ -112,8 +114,8 @@ export class Program<IDL extends Idl = Idl> {
   readonly account: AccountNamespace<IDL>;
 
   /**
-   * The namespace provides functions to build [[TransactionInstruction]]
-   * objects for each method of a program.
+   * The namespace provides functions to build Kit `Instruction` objects for
+   * each method of a program.
    *
    * ## Usage
    *
@@ -144,7 +146,7 @@ export class Program<IDL extends Idl = Idl> {
   readonly instruction: InstructionNamespace<IDL>;
 
   /**
-   * The namespace provides functions to build [[Transaction]] objects for each
+   * The namespace provides functions to build transaction messages for each
    * method of a program.
    *
    * ## Usage
@@ -162,10 +164,10 @@ export class Program<IDL extends Idl = Idl> {
    *
    * ## Example
    *
-   * To create an instruction for the `increment` method above,
+   * To create a transaction message for the `increment` method above,
    *
    * ```javascript
-   * const tx = await program.transaction.increment({
+   * const message = await program.transaction.increment({
    *   accounts: {
    *     counter,
    *   },
@@ -265,11 +267,11 @@ export class Program<IDL extends Idl = Idl> {
    * discriminators and any future encoding changes.
    *
    * ```ts
-   * const ix = new TransactionInstruction({
-   *   programId: program.programId,
-   *   keys: [...],
+   * const ix: Instruction = {
+   *   programAddress: address(program.programId.toBase58()),
+   *   accounts: [...],
    *   data: program.discriminator("instruction", "increment"),
-   * });
+   * };
    * ```
    *
    * Throws if the name isn't in the IDL section.
@@ -388,36 +390,47 @@ export class Program<IDL extends Idl = Idl> {
   ): Promise<IDL | null> {
     provider = provider ?? getProvider();
     const programId = translateAddress(programAddress);
-    const idlAddr = idlAddress(programId);
-    const accountInfo = await provider.connection.getAccountInfo(idlAddr);
-    if (!accountInfo) return null;
+    const account = await fetchEncodedAccount(
+      provider.rpc,
+      toAddress(idlAddress(programId)),
+      withProviderDefaults(provider)
+    );
+    if (!account.exists) return null;
 
-    return decodeIdlAccount<IDL>(accountInfo.data);
+    return decodeIdlAccount<IDL>(Buffer.from(account.data));
   }
 
   /**
-   * Invokes the given callback every time the given event is emitted.
+   * Invokes the given callback every time the given event is emitted, until
+   * `options.abortSignal` fires.
    *
-   * @param eventName The PascalCase name of the event, provided by the IDL.
+   * ```typescript
+   * const controller = new AbortController();
+   * program.addEventListener("myEvent", (event, slot, signature) => {
+   *   console.log(event, slot, signature);
+   * }, { abortSignal: controller.signal });
+   * // Later, to stop listening:
+   * controller.abort();
+   * ```
+   *
+   * @param eventName The name of the event, as provided by the IDL.
    * @param callback  The function to invoke whenever the event is emitted from
    *                  program logs.
+   * @param options   The abort signal ending the subscription, the commitment
+   *                  to listen at, and an error handler: notifications that
+   *                  cannot be processed are reported and skipped, while a
+   *                  failure of the subscription itself is reported as fatal
+   *                  and ends the listener.
    */
   public addEventListener<E extends keyof IdlEvents<IDL>>(
     eventName: E & string,
     callback: (
       event: IdlEvents<IDL>[E],
-      slot: number,
-      signature: string
+      slot: Slot,
+      signature: Signature
     ) => void,
-    commitment?: Commitment
-  ): number {
-    return this._events.addEventListener(eventName, callback, commitment);
-  }
-
-  /**
-   * Unsubscribes from the given eventName.
-   */
-  public async removeEventListener(listener: number): Promise<void> {
-    return await this._events.removeEventListener(listener);
+    options: EventListenerOptions
+  ): void {
+    this._events.addEventListener(eventName, callback, options);
   }
 }

@@ -403,6 +403,44 @@ mod shim {
     miri,
     ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
 )]
+fn idl_generation_rejects_wincode_enum_tag_override() {
+    compile_fail_case(
+        "idl_type_wincode_tag_encoding",
+        r#"
+use anchor_lang::{AnchorDeserialize, AnchorSerialize, IdlType};
+
+#[derive(IdlType, AnchorDeserialize, AnchorSerialize)]
+#[wincode(tag_encoding = "u32")]
+pub enum Bad {
+    A,
+    B(u16),
+}
+"#,
+        &[
+            "`#[derive(IdlType)]` does not support `#[wincode(tag_encoding = ...)]`",
+            "1-byte enum discriminant",
+        ],
+    );
+
+    compile_pass_case(
+        "idl_type_default_enum",
+        r#"
+use anchor_lang::{AnchorDeserialize, AnchorSerialize, IdlType};
+
+#[derive(IdlType, AnchorDeserialize, AnchorSerialize)]
+pub enum DefaultTag {
+    A,
+    B(u16),
+}
+"#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
 fn idl_generation_rejects_lossy_packed_repr_modifiers() {
     compile_fail_case(
         "event_bytemuck_packed_two",
@@ -472,6 +510,41 @@ pub enum MyError {
         &[
             "unknown `#[error_code]` argument `unknown`",
             "expected `offset = N`",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn malformed_error_code_msg_is_rejected() {
+    compile_fail_case(
+        "malformed_error_code_msg",
+        r#"
+use anchor_lang::prelude::*;
+
+#[error_code]
+pub enum BadMsg {
+    #[msg = "oops"]
+    NameValue,
+    #[msg]
+    Path,
+    #[msg("a", "b")]
+    Multi,
+    #[msg(SOME_CONST)]
+    Ident,
+    #[msg(1)]
+    Int,
+    #[msg("a")]
+    #[msg("b")]
+    Duplicate,
+}
+"#,
+        &[
+            r#"expected `#[msg("...")]`"#,
+            "duplicate `#[msg]` attribute",
         ],
     );
 }
@@ -715,6 +788,46 @@ pub mod gated_program {
 #[derive(Accounts)]
 pub struct Noop {}
 "#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn cfg_gated_discriminator_validation() {
+    compile_fail_case(
+        "cfg_gated_discriminator_collision",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[program]
+pub mod collision_program {
+    use super::*;
+
+    #[cfg(unix)]
+    pub fn protected(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[discrim = 214]
+    pub fn decoy(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(any())]
+    pub fn disabled(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Noop {}
+"#,
+        &["instruction `protected` is missing `#[discrim = N]`"],
     );
 }
 

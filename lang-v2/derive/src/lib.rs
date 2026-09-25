@@ -23,6 +23,13 @@ use {
 // #[derive(Accounts)]
 // ---------------------------------------------------------------------------
 
+/// Generate account validation, client builders, and CPI account structs.
+///
+/// Optional account `None` sentinels and default PDA derivation use
+/// `crate::ID` unless the struct is stamped with
+/// `#[accounts_program_id(X)]`. Interface crates whose
+/// `#[program(interface, program_id = X)]` is not this crate's ID must set
+/// that attribute so sentinels and PDAs match the callee.
 #[proc_macro_derive(Accounts, attributes(account, instruction, accounts_program_id))]
 pub fn derive_accounts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -390,7 +397,7 @@ fn impl_to_cpi_accounts(input: &DeriveInput) -> TokenStream2 {
         },
         CpiFieldKind::OptionalReadonly => quote! {
             if let ::core::option::Option::Some(__account) = self.#ident {
-                __handles.push(__account);
+                __handles.push(__account.into_readonly());
             }
         },
         CpiFieldKind::OptionalWritable => quote! {
@@ -986,9 +993,15 @@ fn parse_instruction_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<(Ident, 
     Ok(result)
 }
 
-/// Parse the internal `#[accounts_program_id(expr)]` override used by
-/// `declare_program!` for generated account structs. Ordinary user-written
-/// `#[derive(Accounts)]` structs continue to default to the current crate's ID.
+/// Parse `#[accounts_program_id(expr)]` on an Accounts struct.
+///
+/// This is the program id used for optional-account `None` sentinels and
+/// default PDA derivation (`seeds::program` unset). `declare_program!`
+/// stamps generated structs with the IDL program's `ID`. Hand-written
+/// interface crates should set it to the same `X` as
+/// `#[program(interface, program_id = X)]`. Unannotated structs default to
+/// `crate::ID`. `X` must be a compile-time `Address` (`const` item,
+/// `crate::ID`, or `address!("...")`).
 fn parse_accounts_program_id_attr(attrs: &[syn::Attribute]) -> syn::Result<Expr> {
     let mut program_id = None;
     for attr in attrs {
@@ -2034,6 +2047,8 @@ fn impl_accounts(input: &DeriveInput) -> TokenStream2 {
             pub mod #cpi_mod_name {
                 extern crate alloc;
                 use super::*;
+                #[doc(hidden)]
+                pub const __ANCHOR_ACCOUNTS_PROGRAM_ID: anchor_lang::Address = #accounts_program_id;
                 #[derive(anchor_lang::ToCpiAccounts)]
                 #[accounts_program_id(#accounts_program_id)]
                 pub struct #name<'a> {
@@ -2409,9 +2424,11 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .map(|field| {
                     let ty = &field.ty;
                     let cfg_attrs = cfg_attrs(&field.attrs);
+                    let capacity_check = pod_vec_capacity_check(ty);
                     quote! {
                         #(#cfg_attrs)*
                         {
+                            #capacity_check
                             __size += core::mem::size_of::<#ty>();
                         }
                     }
@@ -2550,6 +2567,9 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(IdlType)]
 pub fn derive_idl_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    if let Some(err) = unsupported_wincode_idl_attr_error("`#[derive(IdlType)]`", &input.attrs) {
+        return err.to_compile_error().into();
+    }
     let name = &input.ident;
     let name_str = name.to_string();
 
@@ -2689,10 +2709,29 @@ fn diagnose_non_pod_field(ty: &Type, field_name: &str, struct_name: &str) -> Opt
     }
 }
 
+/// Force the capacity invariant while evaluating the account's layout const,
+/// even if no `PodVec` methods are used. Rust resolves and evaluates `MAX`,
+/// including named constants and const expressions that the macro cannot
+/// evaluate from syntax alone.
+fn pod_vec_capacity_check(ty: &Type) -> Option<TokenStream2> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "PodVec" {
+        return None;
+    }
+    Some(quote::quote_spanned!(ty.span()=> let _ = <#ty>::CAPACITY;))
+}
+
 // ---------------------------------------------------------------------------
 // #[program]
 // ---------------------------------------------------------------------------
 
+/// Marks a program module.
+///
+/// `#[program(interface, program_id = X)]` emits client and CPI bindings for
+/// an external program. Stamp referenced `#[derive(Accounts)]` structs with
+/// `#[accounts_program_id(X)]` so optional-account sentinels and default
+/// PDAs use `X` rather than this crate's `ID`.
 #[proc_macro_attribute]
 pub fn program(attr: TokenStream, item: TokenStream) -> TokenStream {
     let config = match parse_program_config(attr) {
@@ -3036,6 +3075,7 @@ fn gen_declare_program_errors(
 ) -> syn::Result<TokenStream2> {
     let Some(errors) = idl.get("errors").and_then(serde_json::Value::as_array) else {
         return Ok(quote! {
+            #[cfg(not(feature = "idl-build"))]
             pub mod error {
                 use super::*;
             }
@@ -3044,6 +3084,7 @@ fn gen_declare_program_errors(
 
     if errors.is_empty() {
         return Ok(quote! {
+            #[cfg(not(feature = "idl-build"))]
             pub mod error {
                 use super::*;
             }
@@ -3083,6 +3124,7 @@ fn gen_declare_program_errors(
     }
 
     Ok(quote! {
+        #[cfg(not(feature = "idl-build"))]
         pub mod error {
             use super::*;
 
@@ -3163,10 +3205,12 @@ fn validate_discriminator_prefixes(
     Ok(())
 }
 
-fn validate_instruction_discriminator_prefixes(
+fn instruction_discriminator_validation_tokens(
     handlers: &[&syn::ItemFn],
     discrim_attrs: &[Option<DiscrimAttr>],
-) -> syn::Result<()> {
+    mode: ProgramMode,
+) -> syn::Result<TokenStream2> {
+    let mut validations = TokenStream2::new();
     let discriminators: Vec<_> = handlers
         .iter()
         .enumerate()
@@ -3180,23 +3224,86 @@ fn validate_instruction_discriminator_prefixes(
         })
         .collect();
 
-    for (outer_name, outer_disc, outer_span) in &discriminators {
-        for (inner_name, inner_disc, _) in &discriminators {
-            if outer_name != inner_name && outer_disc.starts_with(inner_disc) {
-                return Err(syn::Error::new(
-                    *outer_span,
+    for i in 0..discriminators.len() {
+        for j in (i + 1)..discriminators.len() {
+            let (first_name, first_disc, first_span) = &discriminators[i];
+            let (second_name, second_disc, second_span) = &discriminators[j];
+            let first_custom = discrim_attrs[i].is_some();
+            let second_custom = discrim_attrs[j].is_some();
+            let mixed_mode = mode == ProgramMode::Executable && first_custom != second_custom;
+            let overlapping =
+                first_disc.starts_with(second_disc) || second_disc.starts_with(first_disc);
+
+            if !mixed_mode && !overlapping {
+                continue;
+            }
+
+            let (message, span) = if mixed_mode {
+                let (missing_name, missing_span) = if first_custom {
+                    (second_name, *second_span)
+                } else {
+                    (first_name, *first_span)
+                };
+                (
                     format!(
-                        "Ambiguous discriminators for instructions: `{inner_name}` discriminator \
-                         {} is a prefix of `{outer_name}` discriminator {}",
-                        format_discriminator_bytes(inner_disc),
-                        format_discriminator_bytes(outer_disc),
+                        "instruction `{missing_name}` is missing `#[discrim = N]`; all instructions \
+                         in `#[program]` must specify custom discriminators when one instruction \
+                         does"
                     ),
-                ));
+                    missing_span,
+                )
+            } else if first_custom
+                && second_custom
+                && first_disc.len() == 1
+                && second_disc.len() == 1
+                && first_disc == second_disc
+            {
+                (
+                    format!(
+                        "duplicate `#[discrim = {}]` on instruction `{}`",
+                        first_disc[0], second_name
+                    ),
+                    *second_span,
+                )
+            } else if first_disc.starts_with(second_disc) {
+                (
+                    format!(
+                        "Ambiguous discriminators for instructions: `{second_name}` discriminator \
+                         {} is a prefix of `{first_name}` discriminator {}",
+                        format_discriminator_bytes(second_disc),
+                        format_discriminator_bytes(first_disc),
+                    ),
+                    *first_span,
+                )
+            } else {
+                (
+                    format!(
+                        "Ambiguous discriminators for instructions: `{first_name}` discriminator \
+                         {} is a prefix of `{second_name}` discriminator {}",
+                        format_discriminator_bytes(first_disc),
+                        format_discriminator_bytes(second_disc),
+                    ),
+                    *second_span,
+                )
+            };
+
+            if has_cfg_attrs(&handlers[i].attrs) || has_cfg_attrs(&handlers[j].attrs) {
+                let first_cfg_attrs = cfg_attrs(&handlers[i].attrs);
+                let second_cfg_attrs = cfg_attrs(&handlers[j].attrs);
+                validations.extend(quote! {
+                    #(#first_cfg_attrs)*
+                    #(#second_cfg_attrs)*
+                    const _: () = {
+                        ::core::compile_error!(#message);
+                    };
+                });
+            } else {
+                return Err(syn::Error::new(span, message));
             }
         }
     }
 
-    Ok(())
+    Ok(validations)
 }
 
 fn format_discriminator_bytes(discriminator: &[u8]) -> String {
@@ -4919,8 +5026,9 @@ fn process_handler(
     handler: &syn::ItemFn,
     mod_name: &Ident,
     discrim_bytes: Option<&[u8]>,
-    program_id: &Expr,
+    config: &ProgramConfig,
 ) -> HandlerCodegen {
+    let program_id = &config.program_id;
     let fn_name = &handler.sig.ident;
     let fn_name_str = fn_name.to_string();
     let handler_cfg_attrs = cfg_attrs(&handler.attrs);
@@ -5227,6 +5335,27 @@ fn process_handler(
     let cpi_accounts_reexport = quote! {
         pub use #cpi_mod::#accounts_ident;
     };
+    // Emitted in `cpi` (which `use super::*`s), not `cpi::accounts`, so a
+    // user `program_id = declared::ID` path resolves the same way the
+    // instruction builder's `#program_id` does.
+    let cpi_mod_from_cpi = accounts_type.helper_module_path("__cpi_accounts_", 1, fn_name.span());
+    let accounts_program_id_check = if config.mode == ProgramMode::Interface {
+        quote! {
+            const _: () = {
+                let __interface_id = (#program_id).to_bytes();
+                let __accounts_id = #cpi_mod_from_cpi::__ANCHOR_ACCOUNTS_PROGRAM_ID.to_bytes();
+                let mut __i = 0;
+                while __i < 32 {
+                    if __interface_id[__i] != __accounts_id[__i] {
+                        panic!("interface program_id does not match accounts_program_id");
+                    }
+                    __i += 1;
+                }
+            };
+        }
+    } else {
+        quote! {}
+    };
 
     // CPI wrapper function — mirrors the handler's argument list (sans
     // `ctx: &mut Context<_>`), packs them into the client-side
@@ -5253,6 +5382,7 @@ fn process_handler(
             (quote! { -> anchor_lang::Result<()> }, quote! { Ok(()) })
         };
         quote! {
+            #accounts_program_id_check
             #(#handler_cfg_attrs)*
             pub fn #fn_name #lt_decl(
                 __ctx: anchor_lang::CpiContext<'a, accounts::#accounts_ident<'a>>,
@@ -5343,32 +5473,9 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
         Err(e) => return e.to_compile_error(),
     };
 
-    let has_cfg_gated_handlers = handlers.iter().any(|handler| has_cfg_attrs(&handler.attrs));
     let has_any_discrim = discrim_attrs.iter().any(|d| d.is_some());
-    let has_all_discrim = discrim_attrs.iter().all(|d| d.is_some());
-    if config.mode == ProgramMode::Executable
-        && has_any_discrim
-        && !has_all_discrim
-        && !has_cfg_gated_handlers
-    {
-        // Point at the first handler missing #[discrim = N] for clarity.
-        let missing = handlers
-            .iter()
-            .zip(discrim_attrs.iter())
-            .find(|(_, d)| d.is_none())
-            .map(|(handler, _)| handler.sig.ident.span())
-            .unwrap_or_else(proc_macro2::Span::call_site);
-        return syn::Error::new(
-            missing,
-            "if any instruction in `#[program]` uses `#[discrim = N]`, all must",
-        )
-        .to_compile_error();
-    }
-
     if config.mode == ProgramMode::Executable && has_any_discrim {
-        let mut seen =
-            (!has_cfg_gated_handlers).then(std::collections::HashMap::<u8, proc_macro2::Span>::new);
-        for (i, d) in discrim_attrs.iter().enumerate() {
+        for d in &discrim_attrs {
             let Some(d) = d.as_ref() else {
                 continue;
             };
@@ -5380,26 +5487,13 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
                 )
                 .to_compile_error();
             }
-            let byte = d.bytes[0];
-            let span = d.span;
-            if let Some(seen) = &mut seen {
-                if let Some(_first_span) = seen.insert(byte, span) {
-                    return syn::Error::new(
-                        span,
-                        format!(
-                            "duplicate `#[discrim = {}]` on instruction `{}`",
-                            byte, handlers[i].sig.ident
-                        ),
-                    )
-                    .to_compile_error();
-                }
-            }
-        }
-    } else if config.mode == ProgramMode::Interface && !has_cfg_gated_handlers {
-        if let Err(err) = validate_instruction_discriminator_prefixes(&handlers, &discrim_attrs) {
-            return err.to_compile_error();
         }
     }
+    let discriminator_validation =
+        match instruction_discriminator_validation_tokens(&handlers, &discrim_attrs, config.mode) {
+            Ok(tokens) => tokens,
+            Err(err) => return err.to_compile_error(),
+        };
     let discrim_attrs: Vec<Option<Vec<u8>>> = discrim_attrs
         .iter()
         .map(|d| d.as_ref().map(|d| d.bytes.clone()))
@@ -5408,7 +5502,7 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
     let codegen: Vec<HandlerCodegen> = handlers
         .iter()
         .enumerate()
-        .map(|(i, h)| process_handler(h, mod_name, discrim_attrs[i].as_deref(), &config.program_id))
+        .map(|(i, h)| process_handler(h, mod_name, discrim_attrs[i].as_deref(), config))
         .collect();
     let handler_errors: Vec<_> = codegen.iter().filter_map(|c| c.error.as_ref()).collect();
     if !handler_errors.is_empty() {
@@ -5664,6 +5758,8 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
     }
 
     quote! {
+        #discriminator_validation
+
         #mod_vis mod #mod_name {
             #(#other_items)*
             #(#handlers)*
@@ -5861,12 +5957,15 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
 /// Two modes:
 ///
 /// **Default (`#[event]`, wincode).** Derives `AnchorSerialize` and
-/// serializes via Wincode with `BORSH_CONFIG`, so
+/// `AnchorDeserialize` and serializes via Wincode with `BORSH_CONFIG`, so
 /// the on-chain wire format is byte-compatible with borsh while keeping
 /// wincode's faster encoding path. Supports arbitrary layouts, including
 /// `Vec`/`String`/`Option`/enums, and is materially cheaper than borsh on
 /// SBF (see `cu-bench` — roughly 3–10× fewer CUs depending on shape). This
-/// is the right default for almost every event.
+/// is the right default for almost every event. Because the type also
+/// derives `AnchorDeserialize`, clients decode it with
+/// `T: Event + AnchorDeserialize` (see `anchor_client::handle_program_log`);
+/// do not add that derive by hand.
 ///
 /// **`#[event(bytemuck)]`.** Emits `#[repr(C)]` + a raw `copy_nonoverlapping`
 /// of the struct bytes. Fastest of the two for fixed-size events, but the
@@ -6042,11 +6141,16 @@ pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match mode {
         EventMode::Wincode => TokenStream::from(quote! {
-            // `#[derive(AnchorSerialize)]` lays down the Wincode per-field encoder.
+            // `#[derive(AnchorSerialize)]` lays down the Wincode per-field
+            // encoder; `#[derive(AnchorDeserialize)]` the decoder, so clients
+            // and tests can read the event back with
+            // `T: Event + AnchorDeserialize` and no extra derive. The decode
+            // impl is generic over the wincode config, so it is only compiled
+            // where something calls it — never inside the `.so`.
             // No `repr(C)` — wincode is layout-agnostic (it walks the derived
             // schema, not the in-memory byte layout) so the compiler is free
             // to pick whichever Rust layout is best.
-            #[derive(anchor_lang::AnchorSerialize)]
+            #[derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)]
             #(#attrs)*
             #vis struct #name #fields
 
@@ -6871,7 +6975,10 @@ mod tests {
     #[test]
     fn process_handler_applies_inline_policy_to_generated_wrapper() {
         let mod_name: syn::Ident = syn::parse_quote!(my_program);
-        let program_id: syn::Expr = syn::parse_quote!(crate::ID);
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
         for (handler, expected) in [
             (
                 syn::parse_quote! {
@@ -6903,7 +7010,7 @@ mod tests {
                 "# [cfg_attr (feature = \"fast\" , inline (always))] pub fn conditional_handler",
             ),
         ] {
-            let wrapper = process_handler(&handler, &mod_name, None, &program_id)
+            let wrapper = process_handler(&handler, &mod_name, None, &config)
                 .wrapper
                 .to_string();
             assert!(wrapper.contains(expected), "unexpected wrapper: {wrapper}");
@@ -6921,9 +7028,12 @@ mod tests {
             }
         };
         let mod_name: syn::Ident = syn::parse_quote!(my_program);
-        let program_id: syn::Expr = syn::parse_quote!(crate::ID);
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
 
-        let generated = process_handler(&handler, &mod_name, None, &program_id);
+        let generated = process_handler(&handler, &mod_name, None, &config);
         let wrapper = generated.wrapper.to_string();
 
         assert!(
@@ -7042,6 +7152,91 @@ mod tests {
         assert!(
             !generated.contains("default_allocator"),
             "interface mode must not emit entrypoint runtime: {generated}"
+        );
+    }
+
+    #[test]
+    fn accounts_derive_exposes_accounts_program_id_const() {
+        let default_input: syn::DeriveInput = syn::parse_quote! {
+            pub struct Empty {}
+        };
+        let default_generated = impl_accounts(&default_input).to_string();
+        assert!(
+            default_generated.contains("pub const __ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "Accounts derive should expose the program id used for optional sentinels and default PDAs: {default_generated}"
+        );
+        assert!(
+            default_generated.contains("crate :: ID"),
+            "unannotated Accounts should default the exposed program id to crate::ID: {default_generated}"
+        );
+
+        let override_input: syn::DeriveInput = syn::parse_quote! {
+            #[accounts_program_id(declared::ID)]
+            pub struct Empty {}
+        };
+        let override_generated = impl_accounts(&override_input).to_string();
+        assert!(
+            override_generated.contains("pub const __ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "Accounts derive should expose an overridden accounts program id: {override_generated}"
+        );
+        assert!(
+            override_generated.contains("declared :: ID"),
+            "#[accounts_program_id] should flow into the exposed const: {override_generated}"
+        );
+    }
+
+    #[test]
+    fn program_interface_mode_asserts_accounts_program_id() {
+        let module: syn::ItemMod = syn::parse_quote! {
+            pub mod external_program {
+                use super::*;
+
+                #[discrim = [1, 2, 3, 4]]
+                pub fn do_it(ctx: &mut Context<MyAccounts>, amount: u64) -> Result<()> {
+                    let _ = (ctx, amount);
+                    unreachable!()
+                }
+            }
+        };
+        let config = ProgramConfig {
+            mode: ProgramMode::Interface,
+            program_id: syn::parse_quote!(super::ID),
+        };
+
+        let generated = impl_program(&module, &config).to_string();
+
+        assert!(
+            generated.contains("__ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "interface mode should compare against the Accounts-side program id const: {generated}"
+        );
+        assert!(
+            generated.contains("interface program_id does not match accounts_program_id"),
+            "interface mode should emit a compile-time mismatch diagnostic: {generated}"
+        );
+    }
+
+    #[test]
+    fn executable_program_mode_skips_accounts_program_id_assertion() {
+        let module: syn::ItemMod = syn::parse_quote! {
+            pub mod demo_program {
+                use super::*;
+
+                pub fn rotate(ctx: &mut Context<RotateAuthority>) -> Result<()> {
+                    let _ = ctx;
+                    Ok(())
+                }
+            }
+        };
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
+
+        let generated = impl_program(&module, &config).to_string();
+
+        assert!(
+            !generated.contains("interface program_id does not match accounts_program_id"),
+            "executable programs share crate::ID by construction and should not emit the interface assertion: {generated}"
         );
     }
 

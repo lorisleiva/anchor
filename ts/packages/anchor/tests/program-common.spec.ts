@@ -1,9 +1,11 @@
 import BN from "bn.js";
-import bs58 from "bs58";
+import { FetchAccountConfig } from "@solana/kit";
 import { PublicKey } from "@solana/web3.js";
 
-import NodeWallet from "../src/nodewallet";
+import { createLocalWallet } from "../src/wallet";
+import { bs58 } from "../src/utils/bytes";
 import { translateAddress } from "../src/program/common";
+import { withProviderDefaults } from "../src/utils/common";
 
 describe("program/common", () => {
   describe("translateAddress", () => {
@@ -55,12 +57,37 @@ describe("program/common", () => {
     });
   });
 
-  describe("NodeWallet", () => {
+  describe("withProviderDefaults", () => {
+    const provider = { opts: { commitment: "processed" as const } };
+
+    it("fills the commitment from the provider", () => {
+      const config: FetchAccountConfig = { minContextSlot: 5n };
+      expect(withProviderDefaults(provider, config)).toEqual({
+        commitment: "processed",
+        minContextSlot: 5n,
+      });
+    });
+
+    it("lets the caller's commitment win", () => {
+      expect(
+        withProviderDefaults(provider, { commitment: "finalized" })
+      ).toEqual({ commitment: "finalized" });
+    });
+
+    it("never emits an undefined commitment", () => {
+      // Kit would strip it without applying its own default.
+      const config = withProviderDefaults({}, { commitment: undefined });
+      expect("commitment" in config).toBe(false);
+      expect(withProviderDefaults({ opts: {} })).toEqual({});
+    });
+  });
+
+  describe("createLocalWallet", () => {
     it("should throw an error when ANCHOR_WALLET is unset", () => {
       const oldValue = process.env.ANCHOR_WALLET;
       delete process.env.ANCHOR_WALLET;
 
-      expect(() => NodeWallet.local()).toThrowError(
+      expect(() => createLocalWallet()).toThrow(
         "expected environment variable `ANCHOR_WALLET` is not set."
       );
 
