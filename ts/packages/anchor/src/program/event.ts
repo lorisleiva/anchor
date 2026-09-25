@@ -41,7 +41,9 @@ export type EventListenerOptions = {
    * the listener keeps going, and when the subscription itself fails, in
    * which case `fatal` is true and no further events are delivered: listen
    * again with a fresh abort signal to resubscribe. Must not throw: a
-   * throwing handler ends the listener as a fatal failure.
+   * throwing handler ends the listener, its error reported once as fatal.
+   * When omitted, failures are dropped and a failing subscription ends the
+   * listener silently.
    */
   onError?: (error: unknown, context: { fatal: boolean }) => void;
 };
@@ -91,10 +93,43 @@ export class EventManager {
           "`rpcSubscriptions` client."
       );
     }
-    const { abortSignal, onError } = options;
+    const { onError } = options;
     const { commitment } = withProviderDefaults(this._provider, {
       commitment: options.commitment,
     });
+
+    // The subscription is bounded by a signal of our own so that the
+    // listener can also be ended from the inside, when the error handler
+    // breaks its contract.
+    const controller = new AbortController();
+    options.abortSignal.addEventListener("abort", () => controller.abort(), {
+      once: true,
+    });
+    if (options.abortSignal.aborted) {
+      controller.abort();
+    }
+    const abortSignal = controller.signal;
+
+    // Hands a failure to `onError`. A handler that throws ends the listener:
+    // its own error is reported once as fatal, so that a misbehaving handler
+    // never surfaces as an unhandled rejection. Nothing is reported once the
+    // listener has ended.
+    const report = (error: unknown, fatal: boolean) => {
+      if (abortSignal.aborted) {
+        return;
+      }
+      try {
+        onError?.(error, { fatal });
+      } catch (handlerError) {
+        controller.abort();
+        try {
+          onError?.(handlerError, { fatal: true });
+        } catch {
+          // The handler threw while being told that it threw: there is no
+          // one left to report to.
+        }
+      }
+    };
 
     (async () => {
       const notifications = await rpcSubscriptions
@@ -109,24 +144,23 @@ export class EventManager {
         }
         try {
           for (const event of this._eventParser.parseLogs(value.logs)) {
+            if (abortSignal.aborted) {
+              return;
+            }
             if (event.name !== eventName) {
               continue;
             }
             try {
               callback(event.data, context.slot, value.signature);
             } catch (error) {
-              onError?.(error, { fatal: false });
+              report(error, false);
             }
           }
         } catch (error) {
-          onError?.(error, { fatal: false });
+          report(error, false);
         }
       }
-    })().catch((error) => {
-      if (!abortSignal.aborted) {
-        onError?.(error, { fatal: true });
-      }
-    });
+    })().catch((error) => report(error, true));
   }
 }
 
