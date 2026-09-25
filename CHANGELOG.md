@@ -20,6 +20,8 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Breaking
 
+- ts: Rewrite the account namespace on `@solana/kit` ([#5088](https://github.com/otter-sec/anchor/pull/5088)).
+- ts: Default the provider commitment to `confirmed` ([#5088](https://github.com/otter-sec/anchor/pull/5088)).
 - lang-v2: Default `#[event]` structs now derive `AnchorDeserialize` as well as `AnchorSerialize`. Remove any explicit `AnchorDeserialize` derive from these structs to avoid conflicting implementations; `#[event(bytemuck)]` is unchanged ([#5078](https://github.com/otter-sec/anchor/pull/5078)).
 - ts: Rewrite the program namespaces on `@solana/kit` ([#5060](https://github.com/otter-sec/anchor/pull/5060)).
 - ts: Rewrite the provider on `@solana/kit` ([#5008](https://github.com/otter-sec/anchor/pull/5008)).
