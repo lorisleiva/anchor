@@ -275,12 +275,85 @@ describe("Program.addEventListener", () => {
       abortSignal: controller.signal,
     });
     await nextTick();
-    // The caller's signal is handed straight to the Kit subscription.
-    expect(aborted).toEqual([controller.signal]);
-    expect(controller.signal.aborted).toBe(false);
+    // The Kit subscription follows the caller's signal.
+    expect(aborted).toHaveLength(1);
+    expect(aborted[0].aborted).toBe(false);
 
     controller.abort();
     expect(aborted[0].aborted).toBe(true);
+  });
+
+  it("ends the listener when the error handler throws", async () => {
+    const aborted: AbortSignal[] = [];
+    const { provider } = mockProvider(
+      {},
+      {
+        subscriptions: logsSubscriptions(
+          [
+            logsNotification([
+              eventLog([1, 2, 3, 4, 5, 6, 7, 8], 1n),
+              eventLog([1, 2, 3, 4, 5, 6, 7, 8], 2n),
+            ]),
+            logsNotification([eventLog([1, 2, 3, 4, 5, 6, 7, 8], 3n)]),
+          ],
+          [],
+          aborted
+        ),
+      }
+    );
+    const program = new Program<CounterIdl>(idl, provider);
+    const callbackFailure = new Error("callback failed");
+    const handlerFailure = new Error("handler failed");
+
+    const received: bigint[] = [];
+    const errors: [unknown, { fatal: boolean }][] = [];
+    program.addEventListener(
+      "incremented",
+      (event) => {
+        received.push(event.count);
+        if (event.count === 1n) throw callbackFailure;
+      },
+      {
+        abortSignal: new AbortController().signal,
+        onError: (error, context) => {
+          errors.push([error, context]);
+          throw handlerFailure;
+        },
+      }
+    );
+    await nextTick();
+
+    // The handler broke its contract on the first report: it is told once,
+    // as a fatal failure, and nothing else is delivered or reported.
+    expect(errors).toEqual([
+      [callbackFailure, { fatal: false }],
+      [handlerFailure, { fatal: true }],
+    ]);
+    expect(received).toEqual([1n]);
+    expect(aborted[0].aborted).toBe(true);
+  });
+
+  it("ends the listener silently on subscription failure without a handler", async () => {
+    const { provider } = mockProvider(
+      {},
+      {
+        subscriptions: {
+          logsNotifications: () => ({
+            subscribe: async () => {
+              throw new Error("websocket closed");
+            },
+          }),
+        },
+      }
+    );
+    const program = new Program<CounterIdl>(idl, provider);
+
+    program.addEventListener("reset", () => {}, {
+      abortSignal: new AbortController().signal,
+    });
+    // Nothing to assert beyond the absence of an unhandled rejection, which
+    // would fail the test run.
+    await nextTick();
   });
 
   it("forwards the listener commitment and reports subscription failures", async () => {
