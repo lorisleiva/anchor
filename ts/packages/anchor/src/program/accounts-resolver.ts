@@ -250,46 +250,39 @@ export class AccountsResolver<IDL extends Idl> {
    * Resolve event CPI accounts `eventAuthority` and `program`.
    *
    * Accounts will only be resolved if they are declared next to each other to
-   * reduce the chance of name collision.
+   * reduce the chance of name collision. Every such pair is resolved, at any
+   * nesting level, since each `#[event_cpi]` struct appends its own.
    */
   private async resolveEventCpi(
     accounts: IdlInstructionAccountItem[],
     path: string[] = []
   ): Promise<void> {
-    for (const i in accounts) {
-      const accountOrAccounts = accounts[i];
-      if (isCompositeAccounts(accountOrAccounts)) {
-        await this.resolveEventCpi(accountOrAccounts.accounts, [
-          ...path,
-          accountOrAccounts.name,
-        ]);
+    for (let i = 0; i < accounts.length; i++) {
+      const account = accounts[i];
+      if (isCompositeAccounts(account)) {
+        await this.resolveEventCpi(account.accounts, [...path, account.name]);
+        continue;
       }
 
-      // Validate next index exists
-      const nextIndex = +i + 1;
-      if (nextIndex === accounts.length) return;
-
-      const currentName = accounts[i].name;
-      const nextName = accounts[nextIndex].name;
-
-      // Populate event CPI accounts if they exist
-      if (currentName === "eventAuthority" && nextName === "program") {
-        const currentPath = [...path, currentName];
-        const nextPath = [...path, nextName];
-
-        if (!this.get(currentPath)) {
-          const [eventAuthority] = await getProgramDerivedAddress({
-            programAddress: this._programId,
-            seeds: ["__event_authority"],
-          });
-          this.set(currentPath, eventAuthority);
-        }
-        if (!this.get(nextPath)) {
-          this.set(nextPath, this._programId);
-        }
-
-        return;
+      const next = accounts[i + 1];
+      if (account.name !== "eventAuthority" || next?.name !== "program") {
+        continue;
       }
+
+      const authorityPath = [...path, account.name];
+      const programPath = [...path, next.name];
+      if (!this.get(authorityPath)) {
+        const [eventAuthority] = await getProgramDerivedAddress({
+          programAddress: this._programId,
+          seeds: ["__event_authority"],
+        });
+        this.set(authorityPath, eventAuthority);
+      }
+      if (!this.get(programPath)) {
+        this.set(programPath, this._programId);
+      }
+      // `program` is consumed by this pair.
+      i++;
     }
   }
 

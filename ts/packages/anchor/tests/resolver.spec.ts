@@ -409,10 +409,11 @@ describe("AccountsResolver", () => {
     ).rejects.toThrow("Unresolved accounts: `foreignVault`");
   });
 
-  it("only lets adjacent event CPI accounts be omitted from accounts()", async () => {
-    // Mirrors `resolveEventCpi`: `eventAuthority` followed by `program` is
-    // filled in (here inside a composite), but an account merely named
-    // `program` elsewhere is not, so the type must keep requiring it.
+  it("resolves every adjacent event CPI pair and only lets those be omitted", async () => {
+    // Mirrors `resolveEventCpi`: each `eventAuthority` immediately followed
+    // by `program` is filled in, at the top level and inside a composite that
+    // comes after it, while an account merely named `program` elsewhere is
+    // not, so the type must keep requiring that one.
     const cpiIdl = {
       ...idl,
       instructions: [
@@ -420,7 +421,9 @@ describe("AccountsResolver", () => {
           name: "emit",
           discriminator: [3, 3, 3, 3, 3, 3, 3, 3],
           accounts: [
+            { name: "eventAuthority" },
             { name: "program" },
+            { name: "lone", accounts: [{ name: "program" }] },
             {
               name: "cpi",
               accounts: [{ name: "eventAuthority" }, { name: "program" }],
@@ -436,7 +439,7 @@ describe("AccountsResolver", () => {
 
     const keys = await program.methods
       .emit()
-      .accounts({ program: lone })
+      .accounts({ lone: { program: lone } })
       .addresses();
 
     const [eventAuthority] = await getProgramDerivedAddress({
@@ -444,13 +447,15 @@ describe("AccountsResolver", () => {
       seeds: [getUtf8Encoder().encode("__event_authority")],
     });
     expect(keys).toEqual({
-      program: lone,
+      eventAuthority,
+      program: PROGRAM_ADDRESS,
+      lone: { program: lone },
       cpi: { eventAuthority, program: PROGRAM_ADDRESS },
     });
 
     // The lone `program` is not an event CPI account: omitting it is a type
     // error, and the resolver would leave it unresolved.
-    // @ts-expect-error `program` is required
+    // @ts-expect-error `lone.program` is required
     program.methods.emit().accounts({});
   });
 
