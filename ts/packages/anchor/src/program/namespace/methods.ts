@@ -70,36 +70,58 @@ export class MethodsBuilderFactory {
   }
 }
 
-type ResolvedAccounts<
-  A extends IdlInstructionAccountItem = IdlInstructionAccountItem
-> = PartialUndefined<ResolvedAccountsRecursive<A>>;
+/**
+ * Accounts the caller must provide to `accounts()`: every account the
+ * resolver cannot fill in itself. Takes the instruction's account list as a
+ * tuple so that adjacency can be inspected.
+ */
+type ResolvedAccounts<Accounts extends readonly IdlInstructionAccountItem[]> =
+  PartialUndefined<ResolvedAccountsRecursive<Accounts>>;
 
 type ResolvedAccountsRecursive<
-  A extends IdlInstructionAccountItem = IdlInstructionAccountItem
+  Accounts extends readonly IdlInstructionAccountItem[]
 > = OmitNever<{
-  [N in A["name"]]: ResolvedAccount<A & { name: N }>;
+  [N in Accounts[number]["name"]]: ResolvedAccount<
+    Accounts[number] & { name: N },
+    EventCpiAccountNames<Accounts>
+  >;
 }>;
 
 /**
- * Accounts the resolver fills in for event CPIs. Deliberately looser than the
- * resolver, which only resolves them when `eventAuthority` is immediately
- * followed by `program` (see `AccountsResolver.resolveEventCpi`): adjacency is
- * not expressible here, so an unrelated account of the same name type-checks
- * when omitted and fails at runtime. Keep the two in sync.
+ * Names of the event CPI accounts the resolver fills in, mirroring
+ * `AccountsResolver.resolveEventCpi`: only an `eventAuthority` immediately
+ * followed by `program` counts, so an unrelated account of either name stays
+ * required. Keep the two in sync.
  */
-type EventCpiAccountName = "eventAuthority" | "program";
+type EventCpiAccountNames<
+  Accounts extends readonly IdlInstructionAccountItem[]
+> = Accounts extends readonly [
+  infer Head extends IdlInstructionAccountItem,
+  infer Next extends IdlInstructionAccountItem,
+  ...infer Rest extends readonly IdlInstructionAccountItem[]
+]
+  ? Head extends { name: "eventAuthority" }
+    ? Next extends { name: "program" }
+      ? "eventAuthority" | "program"
+      : EventCpiAccountNames<[Next, ...Rest]>
+    : EventCpiAccountNames<[Next, ...Rest]>
+  : never;
 
 type ResolvedAccount<
-  A extends IdlInstructionAccountItem = IdlInstructionAccountItem
+  A extends IdlInstructionAccountItem,
+  EventCpi extends string
 > = A extends IdlInstructionAccounts
-  ? ResolvedAccountsRecursive<A["accounts"][number]>
+  ? // A composite whose accounts all resolve is itself omittable.
+    keyof ResolvedAccountsRecursive<A["accounts"]> extends never
+    ? never
+    : ResolvedAccountsRecursive<A["accounts"]>
   : A extends NonNullable<Pick<IdlInstructionAccount, "address">>
   ? never
   : A extends NonNullable<Pick<IdlInstructionAccount, "pda">>
   ? never
   : A extends NonNullable<Pick<IdlInstructionAccount, "relations">>
   ? never
-  : A extends { name: EventCpiAccountName }
+  : A extends { name: EventCpi }
   ? never
   : A extends { signer: true }
   ? AddressInput | undefined
@@ -213,7 +235,7 @@ export class MethodsBuilder<
    * See {@link accountsPartial} for overriding the account resolution or
    * {@link accountsStrict} for strictly specifying all accounts.
    */
-  public accounts(accounts: ResolvedAccounts<A>) {
+  public accounts(accounts: ResolvedAccounts<I["accounts"]>) {
     // @ts-ignore
     return this.accountsPartial(accounts);
   }

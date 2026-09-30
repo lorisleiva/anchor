@@ -409,6 +409,51 @@ describe("AccountsResolver", () => {
     ).rejects.toThrow("Unresolved accounts: `foreignVault`");
   });
 
+  it("only lets adjacent event CPI accounts be omitted from accounts()", async () => {
+    // Mirrors `resolveEventCpi`: `eventAuthority` followed by `program` is
+    // filled in (here inside a composite), but an account merely named
+    // `program` elsewhere is not, so the type must keep requiring it.
+    const cpiIdl = {
+      ...idl,
+      instructions: [
+        {
+          name: "emit",
+          discriminator: [3, 3, 3, 3, 3, 3, 3, 3],
+          accounts: [
+            { name: "program" },
+            {
+              name: "cpi",
+              accounts: [{ name: "eventAuthority" }, { name: "program" }],
+            },
+          ],
+          args: [],
+        },
+      ],
+    } as const satisfies Idl;
+    const { provider } = mockProvider({});
+    const program = new Program<typeof cpiIdl>(cpiIdl, provider);
+    const lone = randomAddress();
+
+    const keys = await program.methods
+      .emit()
+      .accounts({ program: lone })
+      .addresses();
+
+    const [eventAuthority] = await getProgramDerivedAddress({
+      programAddress: PROGRAM_ADDRESS,
+      seeds: [getUtf8Encoder().encode("__event_authority")],
+    });
+    expect(keys).toEqual({
+      program: lone,
+      cpi: { eventAuthority, program: PROGRAM_ADDRESS },
+    });
+
+    // The lone `program` is not an event CPI account: omitting it is a type
+    // error, and the resolver would leave it unresolved.
+    // @ts-expect-error `program` is required
+    program.methods.emit().accounts({});
+  });
+
   it("reports why an account could not be resolved", async () => {
     const { provider } = mockProvider({});
     const program = new Program<ResolverIdl>(idl, provider);
