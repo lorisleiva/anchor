@@ -98,12 +98,13 @@ export class BorshAccountsCoder<A extends string = string>
   }
 
   /**
-   * Get the unique discriminator prepended to all anchor accounts.
+   * Get the unique discriminator prepended to all anchor accounts, as a
+   * fresh copy: the coder keeps using its own.
    *
    * @param name The name of the account to get the discriminator of.
    */
   public accountDiscriminator(name: string): ReadonlyUint8Array {
-    return this.codec(name as A).discriminator;
+    return new Uint8Array(this.codec(name as A).discriminator);
   }
 
   private codec(accountName: A): DiscriminatedIdlCodec {
