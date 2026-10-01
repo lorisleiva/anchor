@@ -14,8 +14,8 @@ use {
     proc_macro2::{Span, TokenStream as TokenStream2},
     quote::quote,
     syn::{
-        parse::Parser, parse_macro_input, spanned::Spanned, Data, DeriveInput, Expr, Fields, FnArg,
-        Ident, ItemMod, ItemStruct, Pat, Type,
+        parse::{Parse, ParseStream, Parser}, parse_macro_input, spanned::Spanned, Data,
+        DeriveInput, Expr, Fields, FnArg, Ident, ItemMod, ItemStruct, LitStr, Pat, Token, Type,
     },
 };
 
@@ -23,6 +23,13 @@ use {
 // #[derive(Accounts)]
 // ---------------------------------------------------------------------------
 
+/// Generate account validation, client builders, and CPI account structs.
+///
+/// Optional account `None` sentinels and default PDA derivation use
+/// `crate::ID` unless the struct is stamped with
+/// `#[accounts_program_id(X)]`. Interface crates whose
+/// `#[program(interface, program_id = X)]` is not this crate's ID must set
+/// that attribute so sentinels and PDAs match the callee.
 #[proc_macro_derive(Accounts, attributes(account, instruction, accounts_program_id))]
 pub fn derive_accounts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -51,8 +58,11 @@ pub fn anchor_deserialize(input: TokenStream) -> TokenStream {
     derive_wincode_schema(input, quote!(anchor_lang::wincode::SchemaRead))
 }
 
-fn derive_wincode_schema(input: TokenStream, schema_derive: TokenStream2) -> TokenStream {
-    let input = TokenStream2::from(input);
+fn derive_wincode_schema(
+    input: TokenStream,
+    schema_derive: TokenStream2,
+) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
     quote! {
         #[derive(#schema_derive)]
         #[wincode(crate = "anchor_lang::wincode")]
@@ -115,54 +125,112 @@ pub(crate) fn find_unsupported_wincode_attr(
     attrs: &[syn::Attribute],
 ) -> syn::Result<Option<(UnsupportedWincodeAttrKind, Span)>> {
     for attr in attrs {
-        if !attr.path().is_ident("wincode") {
+        if attr.path().is_ident("wincode") {
+            if let Some(found) = unsupported_wincode_from_attr(attr)? {
+                return Ok(Some(found));
+            }
             continue;
         }
-
-        let mut unsupported = None;
-        let parse = attr.parse_nested_meta(|meta| {
-            let span = meta.path.span();
-            if meta.path.is_ident("skip") {
-                if meta.input.peek(syn::Token![=]) {
-                    let value = meta.value()?;
-                    let _ = value.parse::<Expr>()?;
-                } else if meta.input.peek(syn::token::Paren) {
-                    meta.parse_nested_meta(|nested| {
-                        if nested.path.is_ident("default") {
-                            return Ok(());
-                        }
-                        if nested.path.is_ident("default_val") {
-                            let value = nested.value()?;
-                            let _ = value.parse::<Expr>()?;
-                        }
-                        Ok(())
-                    })?;
-                }
-                unsupported = Some((UnsupportedWincodeAttrKind::Skip, span));
-            } else if meta.path.is_ident("with") {
-                if meta.input.peek(syn::Token![=]) {
-                    let value = meta.value()?;
-                    let _ = value.parse::<Expr>()?;
-                }
-                unsupported = Some((UnsupportedWincodeAttrKind::With, span));
-            } else if meta.path.is_ident("tag_encoding") {
-                if meta.input.peek(syn::Token![=]) {
-                    let value = meta.value()?;
-                    let _ = value.parse::<Expr>()?;
-                }
-                unsupported = Some((UnsupportedWincodeAttrKind::TagEncoding, span));
+        if attr.path().is_ident("cfg_attr") {
+            if let Some(found) = unsupported_wincode_from_cfg_attr(attr)? {
+                return Ok(Some(found));
             }
-            Ok(())
-        });
-
-        parse?;
-
-        if unsupported.is_some() {
-            return Ok(unsupported);
         }
     }
 
     Ok(None)
+}
+
+fn unsupported_wincode_from_attr(
+    attr: &syn::Attribute,
+) -> syn::Result<Option<(UnsupportedWincodeAttrKind, Span)>> {
+    let mut unsupported = None;
+    attr.parse_nested_meta(|meta| record_unsupported_wincode_meta(meta, &mut unsupported))?;
+    Ok(unsupported)
+}
+
+fn unsupported_wincode_from_cfg_attr(
+    attr: &syn::Attribute,
+) -> syn::Result<Option<(UnsupportedWincodeAttrKind, Span)>> {
+    let Ok(args) = attr.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    ) else {
+        return Ok(None);
+    };
+    unsupported_wincode_from_cfg_attr_args(&args)
+}
+
+fn unsupported_wincode_from_cfg_attr_args(
+    args: &syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>,
+) -> syn::Result<Option<(UnsupportedWincodeAttrKind, Span)>> {
+    for meta in args.iter().skip(1) {
+        match meta {
+            syn::Meta::List(list) if list.path.is_ident("wincode") => {
+                if let Some(found) = unsupported_wincode_from_meta_list(list)? {
+                    return Ok(Some(found));
+                }
+            }
+            syn::Meta::List(list) if list.path.is_ident("cfg_attr") => {
+                let Ok(nested) = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                    .parse2(list.tokens.clone())
+                else {
+                    continue;
+                };
+                if let Some(found) = unsupported_wincode_from_cfg_attr_args(&nested)? {
+                    return Ok(Some(found));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+fn unsupported_wincode_from_meta_list(
+    list: &syn::MetaList,
+) -> syn::Result<Option<(UnsupportedWincodeAttrKind, Span)>> {
+    let mut unsupported = None;
+    syn::meta::parser(|meta| record_unsupported_wincode_meta(meta, &mut unsupported))
+        .parse2(list.tokens.clone())?;
+    Ok(unsupported)
+}
+
+fn record_unsupported_wincode_meta(
+    meta: syn::meta::ParseNestedMeta<'_>,
+    unsupported: &mut Option<(UnsupportedWincodeAttrKind, Span)>,
+) -> syn::Result<()> {
+    let span = meta.path.span();
+    if meta.path.is_ident("skip") {
+        if meta.input.peek(syn::Token![=]) {
+            let value = meta.value()?;
+            let _ = value.parse::<Expr>()?;
+        } else if meta.input.peek(syn::token::Paren) {
+            meta.parse_nested_meta(|nested| {
+                if nested.path.is_ident("default") {
+                    return Ok(());
+                }
+                if nested.path.is_ident("default_val") {
+                    let value = nested.value()?;
+                    let _ = value.parse::<Expr>()?;
+                }
+                Ok(())
+            })?;
+        }
+        *unsupported = Some((UnsupportedWincodeAttrKind::Skip, span));
+    } else if meta.path.is_ident("with") {
+        if meta.input.peek(syn::Token![=]) {
+            let value = meta.value()?;
+            let _ = value.parse::<Expr>()?;
+        }
+        *unsupported = Some((UnsupportedWincodeAttrKind::With, span));
+    } else if meta.path.is_ident("tag_encoding") {
+        if meta.input.peek(syn::Token![=]) {
+            let value = meta.value()?;
+            let _ = value.parse::<Expr>()?;
+        }
+        *unsupported = Some((UnsupportedWincodeAttrKind::TagEncoding, span));
+    }
+    Ok(())
 }
 
 fn update_accounts_stmt_for_handler_pat(pat: &mut Pat) -> syn::Result<syn::Stmt> {
@@ -390,7 +458,7 @@ fn impl_to_cpi_accounts(input: &DeriveInput) -> TokenStream2 {
         },
         CpiFieldKind::OptionalReadonly => quote! {
             if let ::core::option::Option::Some(__account) = self.#ident {
-                __handles.push(__account);
+                __handles.push(__account.into_readonly());
             }
         },
         CpiFieldKind::OptionalWritable => quote! {
@@ -805,20 +873,29 @@ fn has_cfg_attrs(attrs: &[syn::Attribute]) -> bool {
 fn handler_wrapper_inline_attr(attrs: &[syn::Attribute]) -> syn::Attribute {
     attrs
         .iter()
-        .find(|attr| {
-            attr.path().is_ident("inline")
-                || (attr.path().is_ident("cfg_attr")
-                    && attr
-                        .parse_args_with(
-                            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-                        )
-                        .is_ok_and(|args| {
-                            args.iter()
-                                .skip(1)
-                                .any(|arg| arg.path().is_ident("inline"))
-                        }))
+        .find_map(|attr| {
+            if attr.path().is_ident("inline") {
+                return Some(attr.clone());
+            }
+
+            if !attr.path().is_ident("cfg_attr") {
+                return None;
+            }
+
+            let args = attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            let condition = args.first()?.clone();
+            let inline = args
+                .iter()
+                .skip(1)
+                .find(|arg| arg.path().is_ident("inline"))
+                .cloned()?;
+
+            Some(syn::parse_quote!(#[cfg_attr(#condition, #inline)]))
         })
-        .cloned()
         .unwrap_or_else(|| syn::parse_quote!(#[inline(never)]))
 }
 
@@ -986,9 +1063,15 @@ fn parse_instruction_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<(Ident, 
     Ok(result)
 }
 
-/// Parse the internal `#[accounts_program_id(expr)]` override used by
-/// `declare_program!` for generated account structs. Ordinary user-written
-/// `#[derive(Accounts)]` structs continue to default to the current crate's ID.
+/// Parse `#[accounts_program_id(expr)]` on an Accounts struct.
+///
+/// This is the program id used for optional-account `None` sentinels and
+/// default PDA derivation (`seeds::program` unset). `declare_program!`
+/// stamps generated structs with the IDL program's `ID`. Hand-written
+/// interface crates should set it to the same `X` as
+/// `#[program(interface, program_id = X)]`. Unannotated structs default to
+/// `crate::ID`. `X` must be a compile-time `Address` (`const` item,
+/// `crate::ID`, or `address!("...")`).
 fn parse_accounts_program_id_attr(attrs: &[syn::Attribute]) -> syn::Result<Expr> {
     let mut program_id = None;
     for attr in attrs {
@@ -2034,6 +2117,8 @@ fn impl_accounts(input: &DeriveInput) -> TokenStream2 {
             pub mod #cpi_mod_name {
                 extern crate alloc;
                 use super::*;
+                #[doc(hidden)]
+                pub const __ANCHOR_ACCOUNTS_PROGRAM_ID: anchor_lang::Address = #accounts_program_id;
                 #[derive(anchor_lang::ToCpiAccounts)]
                 #[accounts_program_id(#accounts_program_id)]
                 pub struct #name<'a> {
@@ -2217,11 +2302,6 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    if is_borsh {
-        if let Err(err) = reject_float_fields("`#[account(borsh)]`", fields) {
-            return err.to_compile_error().into();
-        }
-    }
     use sha2::Digest;
     let hash = sha2::Sha256::digest(format!("account:{name_str}").as_bytes());
     let disc_bytes = &hash[..8];
@@ -2249,9 +2329,24 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
         idl::TypeKind::BytemuckRepr(repr)
     };
-    let idl_account_entry = match idl::build_account_entry_string(&name_str, disc_bytes) {
-        Some(s) => quote! { Some(#s) },
-        None => quote! { None },
+    let idl_account_entry = quote! { None };
+    let idl_account_entry_fn = quote! {
+        fn __idl_account_entry() -> Option<&'static str> {
+            let __disc = <Self as anchor_lang::Discriminator>::DISCRIMINATOR;
+            let mut __s = anchor_lang::__alloc::string::String::from(
+                concat!("{\"name\":\"", #name_str, "\",\"discriminator\":[")
+            );
+            for (index, byte) in __disc.iter().enumerate() {
+                if index != 0 {
+                    __s.push(',');
+                }
+                __s.push_str(&anchor_lang::__alloc::string::ToString::to_string(byte));
+            }
+            // Retain the defining type only while collecting entries. This
+            // prevents same-named types in different modules being deduped.
+            __s.push_str(concat!("],\"__anchor_type\":\"", module_path!(), "::", #name_str, "\"}"));
+            Some(anchor_lang::__alloc::boxed::Box::leak(__s.into_boxed_str()))
+        }
     };
     let idl_type_def = idl::build_struct_type_def_emission(
         &name_str,
@@ -2409,9 +2504,11 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .map(|field| {
                     let ty = &field.ty;
                     let cfg_attrs = cfg_attrs(&field.attrs);
+                    let capacity_check = pod_vec_capacity_check(ty);
                     quote! {
                         #(#cfg_attrs)*
                         {
+                            #capacity_check
                             __size += core::mem::size_of::<#ty>();
                         }
                     }
@@ -2463,6 +2560,7 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         impl anchor_lang::IdlAccountType for #name {
             const __IDL_ACCOUNT_ENTRY: Option<&'static str> = #idl_account_entry;
+            #idl_account_entry_fn
             fn __idl_type_def() -> Option<&'static str> {
                 #idl_type_def
             }
@@ -2550,6 +2648,9 @@ pub fn account(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(IdlType)]
 pub fn derive_idl_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    if let Some(err) = unsupported_wincode_idl_attr_error("`#[derive(IdlType)]`", &input.attrs) {
+        return err.to_compile_error().into();
+    }
     let name = &input.ident;
     let name_str = name.to_string();
 
@@ -2568,9 +2669,6 @@ pub fn derive_idl_type(input: TokenStream) -> TokenStream {
     let empty_disc: [u8; 0] = [];
     let (idl_type_def, field_dep_walkers, idl_validation_tokens) = match &input.data {
         Data::Struct(data) => {
-            if let Err(err) = reject_float_fields("`#[derive(IdlType)]`", &data.fields) {
-                return err.to_compile_error().into();
-            }
             (
                 idl::build_struct_type_def_emission(
                     &name_str,
@@ -2584,11 +2682,6 @@ pub fn derive_idl_type(input: TokenStream) -> TokenStream {
             )
         }
         Data::Enum(data) => {
-            for variant in &data.variants {
-                if let Err(err) = reject_float_fields("`#[derive(IdlType)]`", &variant.fields) {
-                    return err.to_compile_error().into();
-                }
-            }
             (
                 idl::build_enum_type_def_emission(
                     &name_str,
@@ -2689,10 +2782,29 @@ fn diagnose_non_pod_field(ty: &Type, field_name: &str, struct_name: &str) -> Opt
     }
 }
 
+/// Force the capacity invariant while evaluating the account's layout const,
+/// even if no `PodVec` methods are used. Rust resolves and evaluates `MAX`,
+/// including named constants and const expressions that the macro cannot
+/// evaluate from syntax alone.
+fn pod_vec_capacity_check(ty: &Type) -> Option<TokenStream2> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "PodVec" {
+        return None;
+    }
+    Some(quote::quote_spanned!(ty.span()=> let _ = <#ty>::CAPACITY;))
+}
+
 // ---------------------------------------------------------------------------
 // #[program]
 // ---------------------------------------------------------------------------
 
+/// Marks a program module.
+///
+/// `#[program(interface, program_id = X)]` emits client and CPI bindings for
+/// an external program. Stamp referenced `#[derive(Accounts)]` structs with
+/// `#[accounts_program_id(X)]` so optional-account sentinels and default
+/// PDAs use `X` rather than this crate's `ID`.
 #[proc_macro_attribute]
 pub fn program(attr: TokenStream, item: TokenStream) -> TokenStream {
     let config = match parse_program_config(attr) {
@@ -2959,11 +3071,12 @@ fn gen_declared_program(
             arg_decls.push(quote! { #arg_ident: #ty });
             arg_uses.push(quote! { let _ = #arg_ident; });
         }
-        let return_ty = ix
-            .get("returns")
-            .map(|ty| declare_idl_type_to_tokens(ty, name.span()))
-            .transpose()?
-            .unwrap_or_else(|| quote! { () });
+        let return_ty = if let Some(returns) = ix.get("returns") {
+            let return_ty = declare_idl_type_to_tokens(returns, name.span())?;
+            return_ty
+        } else {
+            quote! { () }
+        };
 
         handlers.push(quote! {
             #[discrim = [#(#discrim_tokens),*]]
@@ -3036,6 +3149,7 @@ fn gen_declare_program_errors(
 ) -> syn::Result<TokenStream2> {
     let Some(errors) = idl.get("errors").and_then(serde_json::Value::as_array) else {
         return Ok(quote! {
+            #[cfg(not(feature = "idl-build"))]
             pub mod error {
                 use super::*;
             }
@@ -3044,6 +3158,7 @@ fn gen_declare_program_errors(
 
     if errors.is_empty() {
         return Ok(quote! {
+            #[cfg(not(feature = "idl-build"))]
             pub mod error {
                 use super::*;
             }
@@ -3083,6 +3198,7 @@ fn gen_declare_program_errors(
     }
 
     Ok(quote! {
+        #[cfg(not(feature = "idl-build"))]
         pub mod error {
             use super::*;
 
@@ -3163,10 +3279,12 @@ fn validate_discriminator_prefixes(
     Ok(())
 }
 
-fn validate_instruction_discriminator_prefixes(
+fn instruction_discriminator_validation_tokens(
     handlers: &[&syn::ItemFn],
     discrim_attrs: &[Option<DiscrimAttr>],
-) -> syn::Result<()> {
+    mode: ProgramMode,
+) -> syn::Result<TokenStream2> {
+    let mut validations = TokenStream2::new();
     let discriminators: Vec<_> = handlers
         .iter()
         .enumerate()
@@ -3180,23 +3298,86 @@ fn validate_instruction_discriminator_prefixes(
         })
         .collect();
 
-    for (outer_name, outer_disc, outer_span) in &discriminators {
-        for (inner_name, inner_disc, _) in &discriminators {
-            if outer_name != inner_name && outer_disc.starts_with(inner_disc) {
-                return Err(syn::Error::new(
-                    *outer_span,
+    for i in 0..discriminators.len() {
+        for j in (i + 1)..discriminators.len() {
+            let (first_name, first_disc, first_span) = &discriminators[i];
+            let (second_name, second_disc, second_span) = &discriminators[j];
+            let first_custom = discrim_attrs[i].is_some();
+            let second_custom = discrim_attrs[j].is_some();
+            let mixed_mode = mode == ProgramMode::Executable && first_custom != second_custom;
+            let overlapping =
+                first_disc.starts_with(second_disc) || second_disc.starts_with(first_disc);
+
+            if !mixed_mode && !overlapping {
+                continue;
+            }
+
+            let (message, span) = if mixed_mode {
+                let (missing_name, missing_span) = if first_custom {
+                    (second_name, *second_span)
+                } else {
+                    (first_name, *first_span)
+                };
+                (
                     format!(
-                        "Ambiguous discriminators for instructions: `{inner_name}` discriminator \
-                         {} is a prefix of `{outer_name}` discriminator {}",
-                        format_discriminator_bytes(inner_disc),
-                        format_discriminator_bytes(outer_disc),
+                        "instruction `{missing_name}` is missing `#[discrim = N]`; all instructions \
+                         in `#[program]` must specify custom discriminators when one instruction \
+                         does"
                     ),
-                ));
+                    missing_span,
+                )
+            } else if first_custom
+                && second_custom
+                && first_disc.len() == 1
+                && second_disc.len() == 1
+                && first_disc == second_disc
+            {
+                (
+                    format!(
+                        "duplicate `#[discrim = {}]` on instruction `{}`",
+                        first_disc[0], second_name
+                    ),
+                    *second_span,
+                )
+            } else if first_disc.starts_with(second_disc) {
+                (
+                    format!(
+                        "Ambiguous discriminators for instructions: `{second_name}` discriminator \
+                         {} is a prefix of `{first_name}` discriminator {}",
+                        format_discriminator_bytes(second_disc),
+                        format_discriminator_bytes(first_disc),
+                    ),
+                    *first_span,
+                )
+            } else {
+                (
+                    format!(
+                        "Ambiguous discriminators for instructions: `{first_name}` discriminator \
+                         {} is a prefix of `{second_name}` discriminator {}",
+                        format_discriminator_bytes(first_disc),
+                        format_discriminator_bytes(second_disc),
+                    ),
+                    *second_span,
+                )
+            };
+
+            if has_cfg_attrs(&handlers[i].attrs) || has_cfg_attrs(&handlers[j].attrs) {
+                let first_cfg_attrs = cfg_attrs(&handlers[i].attrs);
+                let second_cfg_attrs = cfg_attrs(&handlers[j].attrs);
+                validations.extend(quote! {
+                    #(#first_cfg_attrs)*
+                    #(#second_cfg_attrs)*
+                    const _: () = {
+                        ::core::compile_error!(#message);
+                    };
+                });
+            } else {
+                return Err(syn::Error::new(span, message));
             }
         }
     }
 
-    Ok(())
+    Ok(validations)
 }
 
 fn format_discriminator_bytes(discriminator: &[u8]) -> String {
@@ -3495,12 +3676,17 @@ fn gen_declare_program_types(idl: &serde_json::Value) -> syn::Result<Vec<TokenSt
                         )
                     })
                     .unwrap_or_default();
-                let pod_impls = serialization
-                    .is_bytemuck()
-                    .then(|| {
-                        gen_declare_program_pod_impls(&ident, &generics, &fields, serialization)
-                    })
-                    .unwrap_or_default();
+                let pod_impls = if serialization.is_bytemuck() {
+                    gen_declare_program_pod_impls(
+                        &ident,
+                        &generics,
+                        &fields,
+                        serialization,
+                        idl_repr_guarantees_no_padding(ty_def),
+                    )?
+                } else {
+                    quote! {}
+                };
                 let impl_generics = &generics.impl_generics;
                 out.push(match fields {
                     DeclareTypeFields::Named { fields, .. } if serialization.is_bytemuck() => quote! {
@@ -3738,6 +3924,19 @@ fn gen_declare_program_repr(
     .map(|modifier| quote! { , #modifier });
 
     Ok(Some(quote! { #[repr(#kind #modifier)] }))
+}
+
+fn idl_repr_guarantees_no_padding(ty_def: &serde_json::Value) -> bool {
+    let Some(repr) = ty_def.get("repr") else {
+        return false;
+    };
+    match repr.get("kind").and_then(serde_json::Value::as_str) {
+        Some("transparent") => true,
+        _ => repr
+            .get("packed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 fn declare_type_serialization(
@@ -4280,17 +4479,28 @@ fn gen_declare_program_pod_impls(
     generics: &DeclareTypeGenerics,
     fields: &DeclareTypeFields,
     serialization: DeclareTypeSerialization,
-) -> TokenStream2 {
+    layout_has_no_padding: bool,
+) -> syn::Result<TokenStream2> {
     let impl_generics = &generics.impl_generics;
     let ty_generics = &generics.ty_generics;
     // `bytemuckunsafe` is an explicit opt-out of safe Pod derivability:
     // imported layouts may include padding or non-Pod fields. Emit the
     // unsafe impls without field-Pod / no-padding assertions.
     if serialization.is_bytemuck_unsafe() {
-        return quote! {
-            unsafe impl #impl_generics anchor_lang::bytemuck::Pod for #ident #ty_generics {}
-            unsafe impl #impl_generics anchor_lang::bytemuck::Zeroable for #ident #ty_generics {}
-        };
+        let where_clause = &generics.pod_where_clause;
+        return Ok(quote! {
+            unsafe impl #impl_generics anchor_lang::bytemuck::Pod for #ident #ty_generics #where_clause {}
+            unsafe impl #impl_generics anchor_lang::bytemuck::Zeroable for #ident #ty_generics #where_clause {}
+        });
+    }
+
+    // Same rule as bytemuck: generic types need packed or transparent.
+    // `T: Pod` does not prove there is no padding between fields.
+    if !impl_generics.is_empty() && !layout_has_no_padding {
+        return Err(syn::Error::new(
+            ident.span(),
+            "declare_program! generic bytemuck types must be `repr(packed)` or `repr(transparent)`",
+        ));
     }
 
     let field_types = fields.tys();
@@ -4310,20 +4520,39 @@ fn gen_declare_program_pod_impls(
                 + anchor_lang::bytemuck::Zeroable),*
         }
     };
-    quote! {
-        impl #impl_generics #ident #ty_generics #where_clause {
-            const __ANCHOR_DECLARE_PROGRAM_POD_ASSERT: fn() = || {
+    // Item-level `const _: ()` is always evaluated. An unused associated const
+    // on an `impl` is not, so the previous padding `assert!` never ran.
+    //
+    // Same host-wide padding rule as `#[account]` / `#[event(bytemuck)]`
+    // (#4794): `repr(C)` padding follows the *host* backend, so a `u64`
+    // then `u128` layout that is packed on SBF fails here on x86. Unlike
+    // those macros, `declare_program!` cannot rewrite IDL fields to
+    // `PodU128`; padded layouts need `bytemuckunsafe` or a hand-written type.
+    let touch_no_padding = if impl_generics.is_empty() {
+        quote! {
+            const _: () = #ident::__ANCHOR_DECLARE_PROGRAM_NO_PADDING;
+        }
+    } else {
+        quote! {}
+    };
+    Ok(quote! {
+        const _: fn() = || {
+            fn __assert_declare_program_pod_fields #impl_generics () #where_clause {
                 fn assert_pod<T: anchor_lang::bytemuck::Pod>() {}
                 #( assert_pod::<#field_types>(); )*
-            };
-            const __ANCHOR_DECLARE_PROGRAM_NO_PADDING: () = assert!(
-                core::mem::size_of::<Self>() == 0 #(+ core::mem::size_of::<#field_types>())*,
+            }
+        };
+        impl #impl_generics #ident #ty_generics #where_clause {
+            const __ANCHOR_DECLARE_PROGRAM_NO_PADDING: () = ::core::assert!(
+                ::core::mem::size_of::<Self>()
+                    == 0 #(+ ::core::mem::size_of::<#field_types>())*,
                 "declared bytemuck type has padding bytes"
             );
         }
+        #touch_no_padding
         unsafe impl #impl_generics anchor_lang::bytemuck::Pod for #ident #ty_generics #where_clause {}
         unsafe impl #impl_generics anchor_lang::bytemuck::Zeroable for #ident #ty_generics #where_clause {}
-    }
+    })
 }
 
 fn gen_declare_program_type_fields(
@@ -4470,6 +4699,8 @@ fn declare_idl_type_to_tokens(
 
 fn declare_idl_defined_builtin(name: &str) -> Option<TokenStream2> {
     match name {
+        "BTreeMap" => Some(quote! { anchor_lang::__alloc::collections::BTreeMap }),
+        "BTreeSet" => Some(quote! { anchor_lang::__alloc::collections::BTreeSet }),
         "PodBool" => Some(quote! { anchor_lang::pod::PodBool }),
         "PodU16" => Some(quote! { anchor_lang::pod::PodU16 }),
         "PodU32" => Some(quote! { anchor_lang::pod::PodU32 }),
@@ -4785,13 +5016,9 @@ fn wincode_idl_override_tokens_for_fields(
     fields
         .iter()
         .filter_map(|field| {
-            let err_tokens =
-                unsupported_wincode_idl_attr_error(surface, &field.attrs)?.to_compile_error();
-            let cfg_attrs = cfg_attrs(&field.attrs);
-            Some(quote! {
-                #(#cfg_attrs)*
-                const _: () = { #err_tokens };
-            })
+            // Leave the error ungated so `#[wincode(skip)]` still fails when
+            // it sits next to a disabled `#[cfg]`.
+            Some(unsupported_wincode_idl_attr_error(surface, &field.attrs)?.to_compile_error())
         })
         .collect()
 }
@@ -4803,16 +5030,10 @@ fn wincode_idl_override_tokens_for_variants(
     variants
         .iter()
         .flat_map(|variant| {
-            let variant_cfg_attrs = cfg_attrs(&variant.attrs);
             variant.fields.iter().filter_map(move |field| {
-                let err_tokens =
-                    unsupported_wincode_idl_attr_error(surface, &field.attrs)?.to_compile_error();
-                let field_cfg_attrs = cfg_attrs(&field.attrs);
-                Some(quote! {
-                    #(#variant_cfg_attrs)*
-                    #(#field_cfg_attrs)*
-                    const _: () = { #err_tokens };
-                })
+                Some(
+                    unsupported_wincode_idl_attr_error(surface, &field.attrs)?.to_compile_error(),
+                )
             })
         })
         .collect()
@@ -4861,66 +5082,13 @@ fn extract_result_return_type(output: &syn::ReturnType) -> syn::Result<Option<Ty
     }
 }
 
-fn type_contains_float(ty: &Type) -> bool {
-    fn path_arguments_contain_float(arguments: &syn::PathArguments) -> bool {
-        let syn::PathArguments::AngleBracketed(arguments) = arguments else {
-            return false;
-        };
-        arguments.args.iter().any(|argument| match argument {
-            syn::GenericArgument::Type(ty) => type_contains_float(ty),
-            syn::GenericArgument::AssocType(binding) => type_contains_float(&binding.ty),
-            _ => false,
-        })
-    }
-
-    match ty {
-        Type::Path(path) => path.path.segments.iter().any(|segment| {
-            matches!(segment.ident.to_string().as_str(), "f32" | "f64")
-                || path_arguments_contain_float(&segment.arguments)
-        }),
-        Type::Array(array) => type_contains_float(&array.elem),
-        Type::Slice(slice) => type_contains_float(&slice.elem),
-        Type::Reference(reference) => type_contains_float(&reference.elem),
-        Type::Ptr(pointer) => type_contains_float(&pointer.elem),
-        Type::Tuple(tuple) => tuple.elems.iter().any(type_contains_float),
-        Type::Paren(paren) => type_contains_float(&paren.elem),
-        Type::Group(group) => type_contains_float(&group.elem),
-        Type::BareFn(function) => {
-            function
-                .inputs
-                .iter()
-                .any(|argument| type_contains_float(&argument.ty))
-                || matches!(
-                    &function.output,
-                    syn::ReturnType::Type(_, ty) if type_contains_float(ty)
-                )
-        }
-        _ => false,
-    }
-}
-
-fn reject_float_fields(surface: &str, fields: &Fields) -> syn::Result<()> {
-    for field in fields {
-        if type_contains_float(&field.ty) {
-            return Err(syn::Error::new(
-                field.ty.span(),
-                format!(
-                    "`f32` and `f64` are not supported on {surface} because its \
-                     Borsh-compatible decoder would accept NaN; use an integer or fixed-point \
-                     representation"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn process_handler(
     handler: &syn::ItemFn,
     mod_name: &Ident,
     discrim_bytes: Option<&[u8]>,
-    program_id: &Expr,
+    config: &ProgramConfig,
 ) -> HandlerCodegen {
+    let program_id = &config.program_id;
     let fn_name = &handler.sig.ident;
     let fn_name_str = fn_name.to_string();
     let handler_cfg_attrs = cfg_attrs(&handler.attrs);
@@ -4929,16 +5097,6 @@ fn process_handler(
         Ok(return_ty) => return_ty,
         Err(err) => return HandlerCodegen::error(handler, err),
     };
-    if let Some(return_ty) = return_type.as_ref().filter(|ty| type_contains_float(ty)) {
-        return HandlerCodegen::error(
-            handler,
-            syn::Error::new(
-                return_ty.span(),
-                "`f32` and `f64` return values are not supported because the Borsh-compatible \
-                 encoder would accept NaN; use an integer or fixed-point representation",
-            ),
-        );
-    }
     let return_ty = return_type
         .as_ref()
         .map(|return_ty| quote! { #return_ty })
@@ -5015,18 +5173,6 @@ fn process_handler(
             None
         })
         .collect();
-    if let Some((_, ty)) = extra_args.iter().find(|(_, ty)| type_contains_float(ty)) {
-        return HandlerCodegen::error(
-            handler,
-            syn::Error::new(
-                ty.span(),
-                "`f32` and `f64` instruction arguments are not supported because the \
-                 Borsh-compatible decoder would accept NaN; use an integer or fixed-point \
-                 representation",
-            ),
-        );
-    }
-
     let extra_arg_names: Vec<_> = extra_args.iter().map(|(n, _)| *n).collect();
     let (extra_arg_types, has_ref_args) = args_meta(&extra_args);
     let extra_arg_types = &extra_arg_types;
@@ -5227,6 +5373,27 @@ fn process_handler(
     let cpi_accounts_reexport = quote! {
         pub use #cpi_mod::#accounts_ident;
     };
+    // Emitted in `cpi` (which `use super::*`s), not `cpi::accounts`, so a
+    // user `program_id = declared::ID` path resolves the same way the
+    // instruction builder's `#program_id` does.
+    let cpi_mod_from_cpi = accounts_type.helper_module_path("__cpi_accounts_", 1, fn_name.span());
+    let accounts_program_id_check = if config.mode == ProgramMode::Interface {
+        quote! {
+            const _: () = {
+                let __interface_id = (#program_id).to_bytes();
+                let __accounts_id = #cpi_mod_from_cpi::__ANCHOR_ACCOUNTS_PROGRAM_ID.to_bytes();
+                let mut __i = 0;
+                while __i < 32 {
+                    if __interface_id[__i] != __accounts_id[__i] {
+                        panic!("interface program_id does not match accounts_program_id");
+                    }
+                    __i += 1;
+                }
+            };
+        }
+    } else {
+        quote! {}
+    };
 
     // CPI wrapper function — mirrors the handler's argument list (sans
     // `ctx: &mut Context<_>`), packs them into the client-side
@@ -5253,6 +5420,7 @@ fn process_handler(
             (quote! { -> anchor_lang::Result<()> }, quote! { Ok(()) })
         };
         quote! {
+            #accounts_program_id_check
             #(#handler_cfg_attrs)*
             pub fn #fn_name #lt_decl(
                 __ctx: anchor_lang::CpiContext<'a, accounts::#accounts_ident<'a>>,
@@ -5343,32 +5511,9 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
         Err(e) => return e.to_compile_error(),
     };
 
-    let has_cfg_gated_handlers = handlers.iter().any(|handler| has_cfg_attrs(&handler.attrs));
     let has_any_discrim = discrim_attrs.iter().any(|d| d.is_some());
-    let has_all_discrim = discrim_attrs.iter().all(|d| d.is_some());
-    if config.mode == ProgramMode::Executable
-        && has_any_discrim
-        && !has_all_discrim
-        && !has_cfg_gated_handlers
-    {
-        // Point at the first handler missing #[discrim = N] for clarity.
-        let missing = handlers
-            .iter()
-            .zip(discrim_attrs.iter())
-            .find(|(_, d)| d.is_none())
-            .map(|(handler, _)| handler.sig.ident.span())
-            .unwrap_or_else(proc_macro2::Span::call_site);
-        return syn::Error::new(
-            missing,
-            "if any instruction in `#[program]` uses `#[discrim = N]`, all must",
-        )
-        .to_compile_error();
-    }
-
     if config.mode == ProgramMode::Executable && has_any_discrim {
-        let mut seen =
-            (!has_cfg_gated_handlers).then(std::collections::HashMap::<u8, proc_macro2::Span>::new);
-        for (i, d) in discrim_attrs.iter().enumerate() {
+        for d in &discrim_attrs {
             let Some(d) = d.as_ref() else {
                 continue;
             };
@@ -5380,26 +5525,13 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
                 )
                 .to_compile_error();
             }
-            let byte = d.bytes[0];
-            let span = d.span;
-            if let Some(seen) = &mut seen {
-                if let Some(_first_span) = seen.insert(byte, span) {
-                    return syn::Error::new(
-                        span,
-                        format!(
-                            "duplicate `#[discrim = {}]` on instruction `{}`",
-                            byte, handlers[i].sig.ident
-                        ),
-                    )
-                    .to_compile_error();
-                }
-            }
-        }
-    } else if config.mode == ProgramMode::Interface && !has_cfg_gated_handlers {
-        if let Err(err) = validate_instruction_discriminator_prefixes(&handlers, &discrim_attrs) {
-            return err.to_compile_error();
         }
     }
+    let discriminator_validation =
+        match instruction_discriminator_validation_tokens(&handlers, &discrim_attrs, config.mode) {
+            Ok(tokens) => tokens,
+            Err(err) => return err.to_compile_error(),
+        };
     let discrim_attrs: Vec<Option<Vec<u8>>> = discrim_attrs
         .iter()
         .map(|d| d.as_ref().map(|d| d.bytes.clone()))
@@ -5408,7 +5540,7 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
     let codegen: Vec<HandlerCodegen> = handlers
         .iter()
         .enumerate()
-        .map(|(i, h)| process_handler(h, mod_name, discrim_attrs[i].as_deref(), &config.program_id))
+        .map(|(i, h)| process_handler(h, mod_name, discrim_attrs[i].as_deref(), config))
         .collect();
     let handler_errors: Vec<_> = codegen.iter().filter_map(|c| c.error.as_ref()).collect();
     if !handler_errors.is_empty() {
@@ -5664,6 +5796,8 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
     }
 
     quote! {
+        #discriminator_validation
+
         #mod_vis mod #mod_name {
             #(#other_items)*
             #(#handlers)*
@@ -5805,8 +5939,13 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
                 #(#ix_arg_type_registers)*
                 accounts_entries.sort();
                 accounts_entries.dedup();
+                anchor_lang::idl_build::validate_account_discriminator_entries(&accounts_entries);
                 types_entries.sort();
                 types_entries.dedup();
+                let accounts_entries = accounts_entries
+                    .iter()
+                    .map(|entry| anchor_lang::idl_build::strip_account_entry_identity(entry))
+                    .collect::<Vec<_>>();
 
                 let crate_name = env!("CARGO_CRATE_NAME").replace('-', "_");
                 // Pull `description` / `repository` from the program crate's
@@ -5861,12 +6000,15 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
 /// Two modes:
 ///
 /// **Default (`#[event]`, wincode).** Derives `AnchorSerialize` and
-/// serializes via Wincode with `BORSH_CONFIG`, so
+/// `AnchorDeserialize` and serializes via Wincode with `BORSH_CONFIG`, so
 /// the on-chain wire format is byte-compatible with borsh while keeping
 /// wincode's faster encoding path. Supports arbitrary layouts, including
 /// `Vec`/`String`/`Option`/enums, and is materially cheaper than borsh on
 /// SBF (see `cu-bench` — roughly 3–10× fewer CUs depending on shape). This
-/// is the right default for almost every event.
+/// is the right default for almost every event. Because the type also
+/// derives `AnchorDeserialize`, clients decode it with
+/// `T: Event + AnchorDeserialize` (see `anchor_client::handle_program_log`);
+/// do not add that derive by hand.
 ///
 /// **`#[event(bytemuck)]`.** Emits `#[repr(C)]` + a raw `copy_nonoverlapping`
 /// of the struct bytes. Fastest of the two for fixed-size events, but the
@@ -5900,14 +6042,16 @@ fn impl_program(module: &ItemMod, config: &ProgramConfig) -> TokenStream2 {
 /// ```
 #[proc_macro_attribute]
 pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mode = match parse_event_mode(attr) {
-        Ok(mode) => mode,
+    let args = match parse_event_args(attr) {
+        Ok(args) => args,
         Err(err) => return err.to_compile_error().into(),
     };
+    let mode = args.mode;
 
     let input = parse_macro_input!(item as DeriveInput);
     let name = input.ident.clone();
     let name_str = name.to_string();
+    let event_name = args.name.unwrap_or_else(|| name_str.clone());
     let vis = &input.vis;
     let attrs = &input.attrs;
     let fields = match &input.data {
@@ -5918,13 +6062,8 @@ pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into()
         }
     };
-    if matches!(mode, EventMode::Wincode) {
-        if let Err(err) = reject_float_fields("`#[event]`", fields) {
-            return err.to_compile_error().into();
-        }
-    }
     use sha2::Digest;
-    let hash = sha2::Sha256::digest(format!("event:{name_str}").as_bytes());
+    let hash = sha2::Sha256::digest(format!("event:{event_name}").as_bytes());
     let disc_bytes = &hash[..8];
     let disc_literals: Vec<_> = disc_bytes.iter().map(|b| quote! { #b }).collect();
 
@@ -5957,16 +6096,17 @@ pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
         Vec::new()
     };
     let event_type_def = idl::build_struct_type_def_emission(
-        &name_str,
+        &event_name,
         &struct_docs,
         fields,
         type_kind,
         &input.generics,
     );
     let event_disc_json = idl::disc_json(disc_bytes);
+    let event_name_json = serde_json::to_string(&event_name).expect("event name is serializable");
     let event_header_json = format!(
-        "{{\"event\":{{\"name\":\"{}\",\"discriminator\":{}}},\"types\":[",
-        name_str, event_disc_json,
+        "{{\"event\":{{\"name\":{},\"discriminator\":{}}},\"types\":[",
+        event_name_json, event_disc_json,
     );
     // Field types for the transitive type walk. The event itself pushes
     // `type_def_json` into the types accumulator via its `__IDL_TYPE_DEF`
@@ -6042,11 +6182,16 @@ pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match mode {
         EventMode::Wincode => TokenStream::from(quote! {
-            // `#[derive(AnchorSerialize)]` lays down the Wincode per-field encoder.
+            // `#[derive(AnchorSerialize)]` lays down the Wincode per-field
+            // encoder; `#[derive(AnchorDeserialize)]` the decoder, so clients
+            // and tests can read the event back with
+            // `T: Event + AnchorDeserialize` and no extra derive. The decode
+            // impl is generic over the wincode config, so it is only compiled
+            // where something calls it — never inside the `.so`.
             // No `repr(C)` — wincode is layout-agnostic (it walks the derived
             // schema, not the in-memory byte layout) so the compiler is free
             // to pick whichever Rust layout is best.
-            #[derive(anchor_lang::AnchorSerialize)]
+            #[derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)]
             #(#attrs)*
             #vis struct #name #fields
 
@@ -6277,25 +6422,88 @@ fn parse_account_mode(attr: TokenStream) -> Result<bool, syn::Error> {
     }
 }
 
-fn parse_event_mode(attr: TokenStream) -> Result<EventMode, syn::Error> {
-    if attr.is_empty() {
-        return Ok(EventMode::Wincode);
-    }
-    let attr2: proc_macro2::TokenStream = attr.into();
-    let ident: syn::Ident = syn::parse2(attr2.clone()).map_err(|_| {
-        syn::Error::new_spanned(
-            &attr2,
-            "expected `#[event]` or `#[event(bytemuck)]` — no other arguments are supported",
-        )
-    })?;
-    if ident == "bytemuck" {
-        Ok(EventMode::Bytemuck)
-    } else {
+struct EventArgs {
+    mode: EventMode,
+    name: Option<String>,
+}
+
+enum EventArg {
+    Bytemuck,
+    Name(LitStr),
+}
+
+impl Parse for EventArg {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let key: Ident = input.parse()?;
+        if key == "bytemuck" {
+            return Ok(Self::Bytemuck);
+        }
+        if key == "name" {
+            input.parse::<Token![=]>()?;
+            return Ok(Self::Name(input.parse()?));
+        }
         Err(syn::Error::new_spanned(
-            ident,
-            "unknown `#[event]` mode — only `bytemuck` is accepted",
+            key,
+            "unknown `#[event]` argument — only `bytemuck` and `name = \"...\"` are accepted",
         ))
     }
+}
+
+fn parse_event_args(attr: TokenStream) -> Result<EventArgs, syn::Error> {
+    if attr.is_empty() {
+        return Ok(EventArgs {
+            mode: EventMode::Wincode,
+            name: None,
+        });
+    }
+    let attr2: proc_macro2::TokenStream = attr.into();
+    let parser = syn::punctuated::Punctuated::<EventArg, Token![,]>::parse_terminated;
+    let args = parser.parse2(attr2.clone()).map_err(|_| {
+        syn::Error::new_spanned(
+            &attr2,
+            "expected `#[event]`, `#[event(bytemuck)]`, or `#[event(name = \"...\")]`",
+        )
+    })?;
+
+    let mut mode = EventMode::Wincode;
+    let mut name = None;
+    for arg in args {
+        match arg {
+            EventArg::Bytemuck => {
+                if matches!(mode, EventMode::Bytemuck) {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        "duplicate `bytemuck` in `#[event]`",
+                    ));
+                }
+                mode = EventMode::Bytemuck;
+            }
+            EventArg::Name(value) => {
+                if name.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate `name` in `#[event]`",
+                    ));
+                }
+                let value = value.value();
+                if !is_valid_event_name(&value) {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        "event `name` must be a non-empty Rust/IDL identifier",
+                    ));
+                }
+                name = Some(value);
+            }
+        }
+    }
+
+    Ok(EventArgs { mode, name })
+}
+
+fn is_valid_event_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Targeted diagnostics for common non-Pod field types on
@@ -6868,10 +7076,95 @@ mod tests {
         );
     }
 
+    fn first_field_attrs(item: syn::ItemStruct) -> Vec<syn::Attribute> {
+        item.fields
+            .iter()
+            .next()
+            .expect("struct should have a field")
+            .attrs
+            .clone()
+    }
+
+    fn unsupported_kind(attrs: &[syn::Attribute]) -> Option<UnsupportedWincodeAttrKind> {
+        find_unsupported_wincode_attr(attrs)
+            .expect("wincode attr scan should parse")
+            .map(|(kind, _)| kind)
+    }
+
+    #[test]
+    fn wincode_scanner_rejects_direct_skip() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[wincode(skip)]
+                pub skipped: u64,
+            }
+        };
+        assert!(matches!(
+            unsupported_kind(&first_field_attrs(item)),
+            Some(UnsupportedWincodeAttrKind::Skip)
+        ));
+    }
+
+    #[test]
+    fn wincode_scanner_rejects_cfg_attr_skip() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[cfg_attr(feature = "fast", wincode(skip))]
+                pub skipped: u64,
+            }
+        };
+        assert!(matches!(
+            unsupported_kind(&first_field_attrs(item)),
+            Some(UnsupportedWincodeAttrKind::Skip)
+        ));
+    }
+
+    #[test]
+    fn wincode_scanner_rejects_nested_cfg_attr_with() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[cfg_attr(feature = "a", cfg_attr(feature = "b", wincode(with = "shim::ByteCodec")))]
+                pub packed: u64,
+            }
+        };
+        assert!(matches!(
+            unsupported_kind(&first_field_attrs(item)),
+            Some(UnsupportedWincodeAttrKind::With)
+        ));
+    }
+
+    #[test]
+    fn wincode_scanner_rejects_cfg_attr_tag_encoding_on_item() {
+        let item: syn::ItemEnum = syn::parse_quote! {
+            #[cfg_attr(feature = "wide", wincode(tag_encoding = "u32"))]
+            enum E {
+                A,
+            }
+        };
+        assert!(matches!(
+            unsupported_kind(&item.attrs),
+            Some(UnsupportedWincodeAttrKind::TagEncoding)
+        ));
+    }
+
+    #[test]
+    fn wincode_scanner_ignores_cfg_attr_without_wincode_override() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct S {
+                #[cfg_attr(feature = "fast", inline(always))]
+                pub kept: u64,
+            }
+        };
+        assert!(unsupported_kind(&first_field_attrs(item)).is_none());
+    }
+
     #[test]
     fn process_handler_applies_inline_policy_to_generated_wrapper() {
         let mod_name: syn::Ident = syn::parse_quote!(my_program);
-        let program_id: syn::Expr = syn::parse_quote!(crate::ID);
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
         for (handler, expected) in [
             (
                 syn::parse_quote! {
@@ -6894,7 +7187,7 @@ mod tests {
             ),
             (
                 syn::parse_quote! {
-                    #[cfg_attr(feature = "fast", inline(always))]
+                    #[cfg_attr(feature = "fast", inline(always), no_mangle)]
                     pub fn conditional_handler(ctx: &mut Context<MyAccounts>) -> Result<()> {
                         let _ = ctx;
                         Ok(())
@@ -6903,10 +7196,14 @@ mod tests {
                 "# [cfg_attr (feature = \"fast\" , inline (always))] pub fn conditional_handler",
             ),
         ] {
-            let wrapper = process_handler(&handler, &mod_name, None, &program_id)
+            let wrapper = process_handler(&handler, &mod_name, None, &config)
                 .wrapper
                 .to_string();
             assert!(wrapper.contains(expected), "unexpected wrapper: {wrapper}");
+            assert!(
+                !wrapper.contains("no_mangle"),
+                "wrapper copied an unrelated attribute: {wrapper}"
+            );
         }
     }
 
@@ -6921,9 +7218,12 @@ mod tests {
             }
         };
         let mod_name: syn::Ident = syn::parse_quote!(my_program);
-        let program_id: syn::Expr = syn::parse_quote!(crate::ID);
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
 
-        let generated = process_handler(&handler, &mod_name, None, &program_id);
+        let generated = process_handler(&handler, &mod_name, None, &config);
         let wrapper = generated.wrapper.to_string();
 
         assert!(
@@ -7042,6 +7342,91 @@ mod tests {
         assert!(
             !generated.contains("default_allocator"),
             "interface mode must not emit entrypoint runtime: {generated}"
+        );
+    }
+
+    #[test]
+    fn accounts_derive_exposes_accounts_program_id_const() {
+        let default_input: syn::DeriveInput = syn::parse_quote! {
+            pub struct Empty {}
+        };
+        let default_generated = impl_accounts(&default_input).to_string();
+        assert!(
+            default_generated.contains("pub const __ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "Accounts derive should expose the program id used for optional sentinels and default PDAs: {default_generated}"
+        );
+        assert!(
+            default_generated.contains("crate :: ID"),
+            "unannotated Accounts should default the exposed program id to crate::ID: {default_generated}"
+        );
+
+        let override_input: syn::DeriveInput = syn::parse_quote! {
+            #[accounts_program_id(declared::ID)]
+            pub struct Empty {}
+        };
+        let override_generated = impl_accounts(&override_input).to_string();
+        assert!(
+            override_generated.contains("pub const __ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "Accounts derive should expose an overridden accounts program id: {override_generated}"
+        );
+        assert!(
+            override_generated.contains("declared :: ID"),
+            "#[accounts_program_id] should flow into the exposed const: {override_generated}"
+        );
+    }
+
+    #[test]
+    fn program_interface_mode_asserts_accounts_program_id() {
+        let module: syn::ItemMod = syn::parse_quote! {
+            pub mod external_program {
+                use super::*;
+
+                #[discrim = [1, 2, 3, 4]]
+                pub fn do_it(ctx: &mut Context<MyAccounts>, amount: u64) -> Result<()> {
+                    let _ = (ctx, amount);
+                    unreachable!()
+                }
+            }
+        };
+        let config = ProgramConfig {
+            mode: ProgramMode::Interface,
+            program_id: syn::parse_quote!(super::ID),
+        };
+
+        let generated = impl_program(&module, &config).to_string();
+
+        assert!(
+            generated.contains("__ANCHOR_ACCOUNTS_PROGRAM_ID"),
+            "interface mode should compare against the Accounts-side program id const: {generated}"
+        );
+        assert!(
+            generated.contains("interface program_id does not match accounts_program_id"),
+            "interface mode should emit a compile-time mismatch diagnostic: {generated}"
+        );
+    }
+
+    #[test]
+    fn executable_program_mode_skips_accounts_program_id_assertion() {
+        let module: syn::ItemMod = syn::parse_quote! {
+            pub mod demo_program {
+                use super::*;
+
+                pub fn rotate(ctx: &mut Context<RotateAuthority>) -> Result<()> {
+                    let _ = ctx;
+                    Ok(())
+                }
+            }
+        };
+        let config = ProgramConfig {
+            mode: ProgramMode::Executable,
+            program_id: syn::parse_quote!(crate::ID),
+        };
+
+        let generated = impl_program(&module, &config).to_string();
+
+        assert!(
+            !generated.contains("interface program_id does not match accounts_program_id"),
+            "executable programs share crate::ID by construction and should not emit the interface assertion: {generated}"
         );
     }
 

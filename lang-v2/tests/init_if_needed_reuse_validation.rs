@@ -12,6 +12,8 @@ use {
 };
 
 const PROGRAM_ID: [u8; 32] = [0x42; 32];
+// `#[derive(Accounts)]` emits `crate::ID` as a const in the CPI helper module.
+const ID: Address = Address::new_from_array(PROGRAM_ID);
 const FOREIGN_OWNER: [u8; 32] = [0x24; 32];
 const FAKE_MINT_LEN: usize = 66;
 const FAKE_TOKEN_LEN: usize = 64;

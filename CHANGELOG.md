@@ -12,10 +12,27 @@ The minor version will be incremented upon a breaking change and the patch versi
 
 ### Features
 
+- client: Expose `parse_logs` to decode events from transaction logs while tracking the CPI stack ([#5078](https://github.com/otter-sec/anchor/pull/5078)).
+
 ### Fixes
+
+- ts: Encode signed integer PDA seeds as two's complement ([#5114](https://github.com/otter-sec/anchor/pull/5114)).
+- lang-v2: Restore `AnchorSerialize` and `AnchorDeserialize` as traits for generic bounds alongside the derive macros ([#5078](https://github.com/otter-sec/anchor/pull/5078)).
+- lang-v2: Restore compatibility for `BTreeMap`, `BTreeSet`, tuples, and `IdlType` values, and document intentional Wincode differences from v1 Borsh, including NaN acceptance and `HashMap`/`HashSet` iteration ordering. Native Map/Set IDL and TypeScript SDK support remains future work.
 
 ### Breaking
 
+- ts: Remove the `@anchor-lang/spl-*` packages in favour of `@solana-program/*` ([#5116](https://github.com/otter-sec/anchor/pull/5116)).
+- ts: Remove `Native.system()` in favour of `@solana-program/system` ([#5115](https://github.com/otter-sec/anchor/pull/5115)).
+- ts: Move the token, public key and registry utilities to `@solana/kit` ([#5115](https://github.com/otter-sec/anchor/pull/5115)).
+- ts: Resolve accounts on `@solana/kit`, returning addresses from `pubkeys()` ([#5114](https://github.com/otter-sec/anchor/pull/5114)).
+- ts: Listen to events through Kit subscriptions ([#5103](https://github.com/otter-sec/anchor/pull/5103)).
+- ts: Remove `Provider.connection` and `Provider.publicKey` in favour of `rpc`, `rpcSubscriptions` and `wallet.address` ([#5103](https://github.com/otter-sec/anchor/pull/5103)).
+- ts: Rewrite the account namespace on `@solana/kit` ([#5088](https://github.com/otter-sec/anchor/pull/5088)).
+- ts: Default the provider commitment to `confirmed` ([#5088](https://github.com/otter-sec/anchor/pull/5088)).
+- lang-v2: Default `#[event]` structs now derive `AnchorDeserialize` as well as `AnchorSerialize`. Remove any explicit `AnchorDeserialize` derive from these structs to avoid conflicting implementations; `#[event(bytemuck)]` is unchanged ([#5078](https://github.com/otter-sec/anchor/pull/5078)).
+- ts: Rewrite the program namespaces on `@solana/kit` ([#5060](https://github.com/otter-sec/anchor/pull/5060)).
+- ts: Rewrite the provider on `@solana/kit` ([#5008](https://github.com/otter-sec/anchor/pull/5008)).
 - ts: Require Node.js >=22.12 ([#5005](https://github.com/otter-sec/anchor/pull/5005)).
 - ts: Replace the borsh coder with `@solana/kit` codecs and remove the `@anchor-lang/borsh` package ([#4985](https://github.com/otter-sec/anchor/pull/4985)).
 

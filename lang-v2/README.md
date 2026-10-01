@@ -75,13 +75,33 @@ To help improve the migration for users, we've added an additional `compat` flag
 anchor-lang = { git = "...", branch = "anchor-next", features = ["compat"] }
 ```
 
+### Serialization differences from v1
+
+Anchor v2 uses Wincode for its Borsh-shaped serialization surfaces. Wincode
+supports `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, tuples, and floating-point
+values, including `f32::NAN` and `f64::NAN`. These values are not byte-compatible
+with every v1 Borsh encoding:
+
+- Borsh orders `HashMap` / `HashSet` entries by key, while Wincode preserves the
+  collection's iteration order. Use `BTreeMap`, `BTreeSet`, or a sorted
+  `Vec<(K, V)>` when canonical ordering is required.
+- Borsh rejects NaN during float serialization, while Wincode accepts it. Code
+  migrating from v1 should validate float values explicitly when NaN is not a
+  valid application value.
+
+These are intentional serialization differences in the Wincode path, not
+reasons to reject otherwise valid values with the former compatibility guard.
+This applies to Borsh-shaped instruction data, `#[instruction(...)]` values,
+default events, and `#[account(borsh)]` data. Applications that require strict
+v1 behavior should validate values before serialization.
+
 ## Optimizations
 
 Here are some examples of optimizations present in Anchor v2.
 
 - **PDA bumps precomputed at macro time.** If your seeds are all literals, the derive runs the PDA search during compilation and bakes the canonical bump in as a `const`. This lets us skip the runtime PDA search entirely.
 - **Skip the on-curve check for program-owned PDAs.** If the program already owns the account, it had to be created via signed CPI — which did the curve check at the time. Verification can just hash-and-compare. Saves ~1,000 CU per verify.
-- **Wincode events by default.** `#[event]` automatically derives Anchor's Wincode-backed serialization, so programs do not need a direct Wincode dependency. It still handles `Vec` / `String` / `Option` / enums and is 3–10× cheaper than borsh on SBF.
+- **Wincode events by default.** `#[event]` automatically derives `AnchorSerialize` and `AnchorDeserialize`, so programs do not need a direct Wincode dependency. It still handles `Vec` / `String` / `Option` / enums and is 3–10× cheaper than borsh on SBF.
 - **`#[event(bytemuck)]` for fixed-size events.** The struct's `repr(C)` Pod layout already matches the wire format, so emitting is just disc + one memcpy of the body. No per-field encoding, with compile-time rejection of padded layouts.
 - **Alignment-1 Pod wrappers** (`PodU64`, `PodI128`, `PodBool`, ...). Integers stored as `[u8; N]` so the whole `#[account]` struct casts directly from the account's raw bytes. Zero deserialization.
 - **`PodVec<T, MAX>`**: fixed-capacity vec with a `u16` length, stored inline in the account. Variable-length data without heap allocation.
@@ -125,6 +145,32 @@ let metas = multisig_v2::accounts::CreateResolved { creator: creator.pubkey() }
 ```
 
 In v1, the caller built the `AccountMeta` vector by hand on every call — deriving the PDA, wiring up `system_program`, and keeping the order in sync with the handler's `#[derive(Accounts)]`.
+
+## Interface programs
+
+`#[program(interface, program_id = X)]` generates client and CPI bindings for someone else's program. `#[derive(Accounts)]` still defaults optional-account `None` sentinels and PDA derivation to `crate::ID`. If `X` is not this crate's ID, stamp the Accounts structs so those values match the callee:
+
+```rust
+#[derive(Accounts)]
+#[accounts_program_id(declared::ID)]
+pub struct Foo {
+    pub optional: Option<UncheckedAccount>,
+}
+
+#[program(interface, program_id = declared::ID)]
+pub mod foo_interface {
+    use super::*;
+    pub fn ix(_ctx: &mut Context<Foo>) -> Result<()> {
+        unreachable!()
+    }
+}
+```
+
+v2 emits a compile error when the two IDs disagree.
+
+## `declare_program!`
+
+Imported `bytemuck` types use the same host-side no-padding assert as `#[account]` / `#[event]`. A `u64` then `u128` layout is packed on SBF but padded on x86, so the client crate fails to compile. `declare_program!` cannot swap those fields for `PodU128`. Generic `repr(C)` types are rejected because `T: Pod` does not rule out padding between fields; packed and transparent stay. Use `bytemuckunsafe` in the IDL or a hand-written type. `PodVec` is emitted as `bytemuckunsafe` for that reason.
 
 ## Extensibility
 

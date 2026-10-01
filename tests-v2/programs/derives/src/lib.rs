@@ -69,6 +69,9 @@ pub mod limits {
 #[derive(IdlType)]
 pub struct QualifiedUserTypeHolder<const N: usize> {
     pub authority: anchor_lang::prelude::Address,
+    pub root_authority: anchor_lang::Address,
+    #[cfg(feature = "compat")]
+    pub compat_authority: anchor_lang::solana_program::pubkey::Pubkey,
     pub pinocchio_authority: pinocchio::address::Address,
     pub inner: qualified::Inner,
     pub literal_expr: [u8; 1 + 1],
@@ -79,8 +82,8 @@ pub struct QualifiedUserTypeHolder<const N: usize> {
 // ---- #[event] -------------------------------------------------------------
 
 /// Default-mode event (Wincode with a borsh-compatible wire format).
-/// `#[event]` derives `AnchorSerialize` automatically; `emit!` serializes via
-/// `Event::data()` and calls `sol_log_data`, which
+/// `#[event]` derives `AnchorSerialize` and `AnchorDeserialize` automatically.
+/// `emit!` serializes via `Event::data()` and calls `sol_log_data`, which
 /// surfaces to clients as a `Program data: <base64>` log line.
 #[event]
 pub struct Bumped {
@@ -305,6 +308,9 @@ mod idl_tests {
         let type_def = <QualifiedUserTypeHolder<4> as IdlAccountType>::__idl_type_def()
             .expect("QualifiedUserTypeHolder should emit an IDL type");
         assert!(type_def.contains("\"name\":\"authority\",\"type\":\"pubkey\""));
+        assert!(type_def.contains("\"name\":\"root_authority\",\"type\":\"pubkey\""));
+        #[cfg(feature = "compat")]
+        assert!(type_def.contains("\"name\":\"compat_authority\",\"type\":\"pubkey\""));
         assert!(type_def.contains("\"name\":\"pinocchio_authority\",\"type\":\"pubkey\""));
         assert!(type_def.contains("\"defined\":{\"name\":\"Inner\"}"));
         assert!(!type_def.contains("qualified::Inner"));
@@ -374,7 +380,7 @@ mod idl_tests {
             })
             .expect("PodVec generic layout should be registered");
         assert!(pod_vec_type.contains("\"generics\":[{\"kind\":\"type\",\"name\":\"T\"},{\"kind\":\"const\",\"name\":\"MAX\",\"type\":\"usize\"}]"));
-        assert!(pod_vec_type.contains("\"serialization\":\"bytemuck\""));
+        assert!(pod_vec_type.contains("\"serialization\":\"bytemuckunsafe\""));
         assert!(pod_vec_type.contains("\"repr\":{\"kind\":\"c\"}"));
         assert!(pod_vec_type.contains("\"fields\":[{\"name\":\"len\",\"type\":{\"defined\":{\"name\":\"PodU16\"}}},{\"name\":\"data\",\"type\":{\"array\":[{\"generic\":\"T\"},{\"generic\":\"MAX\"}]}}]"));
     }

@@ -74,13 +74,71 @@ pub trait IdlAccountType {
     /// Wrappers (`Box<T>`, `BorshAccount<T>`, `Nested<T>`) forward to the
     /// inner type. `Slab<H, T>` currently forwards only the header `H`;
     /// see [`crate::accounts::Slab`] for the limitation. Collection impls
-    /// (`Vec<T>`, `Option<T>`, `[T; N]`, `[T]`, `&T`, `PodVec<T, N>`) forward
-    /// to the element type. Primitive impls (bool, u*, i*, f*, String,
+    /// (`Vec<T>`, `BTreeMap<K, V>`, `BTreeSet<T>`, `Option<T>`, `[T; N]`,
+    /// `[T]`, `&T`, tuples, `PodVec<T, N>`) forward to their element types.
+    /// Primitive impls (bool, u*, i*, f*, String,
     /// Address, etc.) use the default no-op — they never appear in `types[]`.
     fn __register_idl_deps(
         _accounts: &mut alloc::vec::Vec<&'static str>,
         _types: &mut alloc::vec::Vec<&'static str>,
     ) {
+    }
+}
+
+/// Reject account discriminator collisions while building a v2 IDL.
+///
+/// Account entries carry a private defining-type suffix during collection so
+/// repeated references to one type can be deduplicated without collapsing two
+/// same-named types from different modules. The suffix is removed before the
+/// public IDL is printed.
+#[doc(hidden)]
+pub fn validate_account_discriminator_entries(entries: &[&str]) {
+    const DISC_MARKER: &str = ",\"discriminator\":[";
+    const TYPE_MARKER: &str = ",\"__anchor_type\":\"";
+
+    fn field<'a>(entry: &'a str, marker: &str, terminator: char) -> Option<&'a str> {
+        let start = entry.find(marker)? + marker.len();
+        let end = start + entry[start..].find(terminator)?;
+        Some(&entry[start..end])
+    }
+
+    fn is_prefix(short: &str, long: &str) -> bool {
+        long == short
+            || long
+                .strip_prefix(short)
+                .is_some_and(|remainder| remainder.starts_with(','))
+    }
+
+    for (index, outer) in entries.iter().enumerate() {
+        let Some(outer_disc) = field(outer, DISC_MARKER, ']') else {
+            continue;
+        };
+        let Some(outer_type) = field(outer, TYPE_MARKER, '"') else {
+            continue;
+        };
+        for inner in entries.iter().skip(index + 1) {
+            let Some(inner_disc) = field(inner, DISC_MARKER, ']') else {
+                continue;
+            };
+            let Some(inner_type) = field(inner, TYPE_MARKER, '"') else {
+                continue;
+            };
+            if outer_type != inner_type
+                && (is_prefix(outer_disc, inner_disc) || is_prefix(inner_disc, outer_disc))
+            {
+                panic!("Ambiguous discriminators for accounts `{outer_type}` and `{inner_type}`");
+            }
+        }
+    }
+}
+
+/// Remove the private defining-type suffix from a collected account entry.
+#[doc(hidden)]
+pub fn strip_account_entry_identity(entry: &str) -> alloc::string::String {
+    const TYPE_MARKER: &str = ",\"__anchor_type\":\"";
+    match entry.find(TYPE_MARKER) {
+        Some(index) => alloc::string::String::from(&entry[..index]) + "}",
+        None => entry.into(),
     }
 }
 
@@ -172,6 +230,60 @@ impl<T: IdlAccountType> IdlAccountType for alloc::vec::Vec<T> {
     }
 }
 
+#[doc(hidden)]
+impl<K: IdlAccountType, V: IdlAccountType> IdlAccountType for alloc::collections::BTreeMap<K, V> {
+    fn __register_idl_deps(
+        accounts: &mut alloc::vec::Vec<&'static str>,
+        types: &mut alloc::vec::Vec<&'static str>,
+    ) {
+        K::__register_idl_deps(accounts, types);
+        V::__register_idl_deps(accounts, types);
+    }
+}
+
+#[doc(hidden)]
+impl<T: IdlAccountType> IdlAccountType for alloc::collections::BTreeSet<T> {
+    fn __register_idl_deps(
+        accounts: &mut alloc::vec::Vec<&'static str>,
+        types: &mut alloc::vec::Vec<&'static str>,
+    ) {
+        T::__register_idl_deps(accounts, types);
+    }
+}
+
+macro_rules! impl_idl_account_type_tuple {
+    ($($ty:ident),+ $(,)?) => {
+        #[doc(hidden)]
+        impl<$($ty: IdlAccountType),+> IdlAccountType for ($($ty,)+) {
+            fn __register_idl_deps(
+                accounts: &mut alloc::vec::Vec<&'static str>,
+                types: &mut alloc::vec::Vec<&'static str>,
+            ) {
+                $( $ty::__register_idl_deps(accounts, types); )+
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+impl IdlAccountType for () {}
+
+impl_idl_account_type_tuple!(A, B);
+impl_idl_account_type_tuple!(A, B, C);
+impl_idl_account_type_tuple!(A, B, C, D);
+impl_idl_account_type_tuple!(A, B, C, D, E);
+impl_idl_account_type_tuple!(A, B, C, D, E, F);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_idl_account_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
 // Borrowed slice `&[T]` — surfaces on `#[derive(IdlType)]` structs that
 // carry borrowed slice fields (e.g. `MixedArgs<'a> { values: &'a [u64] }`),
 // which wincode supports as a zero-copy ix arg.
@@ -221,6 +333,8 @@ impl<T: IdlAccountType, const N: usize> IdlAccountType for [T; N] {
 // It contributes a generic type definition so downstream `declare_program!`
 // consumers can reconstruct the length prefix plus fixed-capacity backing
 // array, then recurses into the element type.
+// Pod is hand-written (`PodVecElement`), so the IDL uses `bytemuckunsafe`
+// and keeps this generic `repr(C)` layout.
 #[doc(hidden)]
 impl<T, const MAX: usize> IdlAccountType for crate::pod::PodVec<T, MAX>
 where
@@ -229,7 +343,7 @@ where
     const __IDL_TYPE_DEF: Option<&'static str> = Some(
         "{\"name\":\"PodVec\",\"generics\":[{\"kind\":\"type\",\"name\":\"T\"},\
          {\"kind\":\"const\",\"name\":\"MAX\",\"type\":\"usize\"}],\
-         \"serialization\":\"bytemuck\",\"repr\":{\"kind\":\"c\"},\
+         \"serialization\":\"bytemuckunsafe\",\"repr\":{\"kind\":\"c\"},\
          \"type\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"len\",\"type\":{\"defined\":{\"name\":\"PodU16\"}}},\
          {\"name\":\"data\",\"type\":{\"array\":[{\"generic\":\"T\"},{\"generic\":\"MAX\"}]}}]}}",
     );

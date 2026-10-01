@@ -283,7 +283,7 @@
           {
             "name": "Tuple",
             "fields": [
-              "f32",
+              "u32",
               {
                 "generic": "T"
               }
@@ -438,7 +438,7 @@
           "type": "usize"
         }
       ],
-      "serialization": "bytemuck",
+      "serialization": "bytemuckunsafe",
       "repr": {
         "kind": "c"
       },

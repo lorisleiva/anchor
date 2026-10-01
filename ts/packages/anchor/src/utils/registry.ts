@@ -1,9 +1,17 @@
-import fetch from "cross-fetch";
-import { Address, getStructCodec, getU32Codec, getU64Codec } from "@solana/kit";
-import { Connection, PublicKey } from "@solana/web3.js";
+import {
+  Address,
+  fetchEncodedAccount,
+  GetAccountInfoApi,
+  getStructCodec,
+  getU32Codec,
+  getU64Codec,
+  ReadonlyUint8Array,
+  Rpc,
+} from "@solana/kit";
+import { AddressInput, toAddress } from "../program/common.js";
 import {
   getAnchorOptionCodec,
-  getPublicKeyCodec,
+  getAnchorAddressCodec,
   getRustEnumCodec,
 } from "../coder/borsh/codecs.js";
 
@@ -13,13 +21,14 @@ import {
  * last verified build.
  */
 export async function verifiedBuild(
-  connection: Connection,
-  programId: PublicKey,
+  rpc: Rpc<GetAccountInfoApi>,
+  programId: AddressInput,
   limit: number = 5
 ): Promise<Build | null> {
-  const url = `https://api.apr.dev/api/v0/program/${programId.toString()}/latest?limit=${limit}`;
+  const programAddress = toAddress(programId);
+  const url = `https://api.apr.dev/api/v0/program/${programAddress}/latest?limit=${limit}`;
   const [programData, latestBuildsResp] = await Promise.all([
-    fetchData(connection, programId),
+    fetchData(rpc, programAddress),
     fetch(url),
   ]);
 
@@ -48,23 +57,22 @@ export async function verifiedBuild(
  * metadata for this program, e.g., the upgrade authority.
  */
 export async function fetchData(
-  connection: Connection,
-  programId: PublicKey
+  rpc: Rpc<GetAccountInfoApi>,
+  programId: AddressInput
 ): Promise<ProgramData> {
-  const accountInfo = await connection.getAccountInfo(programId);
-  if (accountInfo === null) {
+  const programAccount = await fetchEncodedAccount(rpc, toAddress(programId));
+  if (!programAccount.exists) {
     throw new Error("program account not found");
   }
-  const { program } = decodeUpgradeableLoaderState(accountInfo.data);
-  const programdataAccountInfo = await connection.getAccountInfo(
-    new PublicKey(program.programdataAddress)
+  const { program } = decodeUpgradeableLoaderState(programAccount.data);
+  const programDataAccount = await fetchEncodedAccount(
+    rpc,
+    program.programdataAddress
   );
-  if (programdataAccountInfo === null) {
+  if (!programDataAccount.exists) {
     throw new Error("program data account not found");
   }
-  const { programData } = decodeUpgradeableLoaderState(
-    programdataAccountInfo.data
-  );
+  const { programData } = decodeUpgradeableLoaderState(programDataAccount.data);
   return programData;
 }
 
@@ -76,22 +84,28 @@ const UPGRADEABLE_LOADER_STATE_CODEC = getRustEnumCodec(
     [
       "buffer",
       getStructCodec([
-        ["authorityAddress", getAnchorOptionCodec(getPublicKeyCodec())],
+        ["authorityAddress", getAnchorOptionCodec(getAnchorAddressCodec())],
       ]),
     ],
-    ["program", getStructCodec([["programdataAddress", getPublicKeyCodec()]])],
+    [
+      "program",
+      getStructCodec([["programdataAddress", getAnchorAddressCodec()]]),
+    ],
     [
       "programData",
       getStructCodec([
         ["slot", getU64Codec()],
-        ["upgradeAuthorityAddress", getAnchorOptionCodec(getPublicKeyCodec())],
+        [
+          "upgradeAuthorityAddress",
+          getAnchorOptionCodec(getAnchorAddressCodec()),
+        ],
       ]),
     ],
   ],
   getU32Codec()
 );
 
-export function decodeUpgradeableLoaderState(data: Buffer): any {
+export function decodeUpgradeableLoaderState(data: ReadonlyUint8Array): any {
   return UPGRADEABLE_LOADER_STATE_CODEC.decode(data);
 }
 

@@ -195,6 +195,7 @@ pub mod declared {
         anchor_lang::address!("Con9ukTn9BRPXWcjS2UBbuN3NnCwy1hcaDNZ9Hb8QMNp");
 
     #[derive(Accounts)]
+    #[accounts_program_id(ID)]
     pub struct Invoke {
         #[account(signer)]
         pub authority: Signer,
@@ -294,6 +295,7 @@ const EXTERNAL_ID: Address =
     anchor_lang::address!("Con9ukTn9BRPXWcjS2UBbuN3NnCwy1hcaDNZ9Hb8QMNp");
 
 #[derive(Accounts)]
+#[accounts_program_id(EXTERNAL_ID)]
 pub struct Maybe {
     pub required: UncheckedAccount,
     pub optional: Option<UncheckedAccount>,
@@ -312,6 +314,79 @@ pub mod program_interface_optional_cpi {
 "#,
     )
     .features(&["cpi"])
+    .expect_pass();
+}
+
+#[test]
+fn program_interface_rejects_mismatched_accounts_program_id() {
+    CompileCase::new(
+        "program_interface_mismatched_program_id",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+const EXTERNAL_ID: Address =
+    anchor_lang::address!("Con9ukTn9BRPXWcjS2UBbuN3NnCwy1hcaDNZ9Hb8QMNp");
+
+#[derive(Accounts)]
+pub struct Maybe {
+    pub required: UncheckedAccount,
+    pub optional: Option<UncheckedAccount>,
+}
+
+#[program(interface, program_id = EXTERNAL_ID)]
+pub mod program_interface_mismatched_program_id {
+    use super::*;
+
+    #[discrim = [1]]
+    pub fn maybe(ctx: &mut Context<Maybe>) -> Result<()> {
+        let _ = ctx;
+        unreachable!()
+    }
+}
+"#,
+    )
+    .expect_fail(&["interface program_id does not match accounts_program_id"]);
+}
+
+#[test]
+fn program_interface_accepts_matching_accounts_program_id() {
+    CompileCase::new(
+        "program_interface_matching_program_id",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+const EXTERNAL_ID: Address =
+    anchor_lang::address!("Con9ukTn9BRPXWcjS2UBbuN3NnCwy1hcaDNZ9Hb8QMNp");
+
+#[derive(Accounts)]
+#[accounts_program_id(EXTERNAL_ID)]
+pub struct Maybe {
+    pub required: UncheckedAccount,
+    pub optional: Option<UncheckedAccount>,
+}
+
+#[program(interface, program_id = EXTERNAL_ID)]
+pub mod program_interface_matching_program_id {
+    use super::*;
+
+    #[discrim = [1]]
+    pub fn maybe(ctx: &mut Context<Maybe>) -> Result<()> {
+        let _ = ctx;
+        unreachable!()
+    }
+}
+
+pub fn none_sentinel(required: Address) -> Vec<anchor_lang::AccountMeta> {
+    crate::accounts::Maybe {
+        required,
+        optional: None,
+    }
+    .to_account_metas(None)
+}
+"#,
+    )
     .expect_pass();
 }
 
@@ -391,6 +466,7 @@ const EXTERNAL_ID: Address =
     anchor_lang::address!("Con9ukTn9BRPXWcjS2UBbuN3NnCwy1hcaDNZ9Hb8QMNp");
 
 #[derive(Accounts)]
+#[accounts_program_id(EXTERNAL_ID)]
 pub struct Empty {}
 
 #[program(interface, program_id = EXTERNAL_ID)]
@@ -1382,6 +1458,143 @@ fn declare_program_rejects_bytemuck_enum_type() {
 }
 
 #[test]
+fn declare_program_rejects_bytemuck_padding() {
+    declare_program_compile_fail_case(
+        "declare_program_bytemuck_padding",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "bad", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [],
+  "types": [
+    {
+      "name": "Padded",
+      "serialization": "bytemuck",
+      "repr": { "kind": "c" },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "flag", "type": "u8" },
+          { "name": "wide", "type": "u64" }
+        ]
+      }
+    }
+  ]
+}"#,
+        &["declared bytemuck type has padding bytes"],
+    );
+}
+
+#[test]
+fn declare_program_accepts_packed_bytemuck_layout() {
+    declare_program_case(
+        "declare_program_bytemuck_packed",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "ok", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [],
+  "types": [
+    {
+      "name": "Packed",
+      "serialization": "bytemuck",
+      "repr": { "kind": "c", "packed": true },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "flag", "type": "u8" },
+          { "name": "wide", "type": "u64" }
+        ]
+      }
+    }
+  ]
+}"#,
+    )
+    .expect_pass();
+}
+
+#[test]
+fn declare_program_rejects_generic_bytemuck_repr_c() {
+    declare_program_compile_fail_case(
+        "declare_program_generic_bytemuck_repr_c",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "bad", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [],
+  "types": [
+    {
+      "name": "Padded",
+      "serialization": "bytemuck",
+      "repr": { "kind": "c" },
+      "generics": [{ "kind": "type", "name": "T" }],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "flag", "type": "u8" },
+          { "name": "wide", "type": { "generic": "T" } }
+        ]
+      }
+    }
+  ]
+}"#,
+        &["generic bytemuck types must be `repr(packed)` or `repr(transparent)`"],
+    );
+}
+
+#[test]
+fn declare_program_accepts_generic_packed_bytemuck() {
+    declare_program_case(
+        "declare_program_generic_bytemuck_packed",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "ok", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [],
+  "types": [
+    {
+      "name": "Packed",
+      "serialization": "bytemuck",
+      "repr": { "kind": "c", "packed": true },
+      "generics": [{ "kind": "type", "name": "T" }],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "flag", "type": "u8" },
+          { "name": "wide", "type": { "generic": "T" } }
+        ]
+      }
+    }
+  ]
+}"#,
+    )
+    .expect_pass();
+}
+
+#[test]
+fn declare_program_accepts_generic_transparent_bytemuck() {
+    declare_program_case(
+        "declare_program_generic_bytemuck_transparent",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "ok", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [],
+  "types": [
+    {
+      "name": "Wrapper",
+      "serialization": "bytemuck",
+      "repr": { "kind": "transparent" },
+      "generics": [{ "kind": "type", "name": "T" }],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "inner", "type": { "generic": "T" } }
+        ]
+      }
+    }
+  ]
+}"#,
+    )
+    .expect_pass();
+}
+
+#[test]
 fn declare_program_return_wrapper_compiles_for_returning_cpi() {
     CompileCase::new(
         "declare_program_return_wrapper",
@@ -1412,6 +1625,63 @@ pub fn use_return<'a>(program: &'a Address, data: CpiHandle<'a>) {
       ],
       "args": [],
       "returns": "u64"
+    }
+  ]
+}"#,
+    )
+    .expect_pass();
+}
+
+#[test]
+fn declare_program_generic_references_compile() {
+    declare_program_case(
+        "declare_program_generic_references",
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": { "name": "bad", "version": "0.1.0", "spec": "0.1.0" },
+  "instructions": [
+    {
+      "name": "use_generic",
+      "discriminator": [1],
+      "accounts": [],
+      "args": [
+        {
+          "name": "wrapper",
+          "type": {
+            "defined": {
+              "name": "Wrapper",
+              "generics": [{ "kind": "type", "type": "u64" }]
+            }
+          }
+        },
+        {
+          "name": "buffer",
+          "type": {
+            "defined": {
+              "name": "Buf",
+              "generics": [{ "kind": "const", "value": "64" }]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "name": "Wrapper",
+      "generics": [{ "kind": "type", "name": "T" }],
+      "type": {
+        "kind": "struct",
+        "fields": [{ "name": "value", "type": { "generic": "T" } }]
+      }
+    },
+    {
+      "name": "Buf",
+      "generics": [{ "kind": "const", "name": "N", "type": "usize" }],
+      "type": {
+        "kind": "struct",
+        "fields": [{ "name": "bytes", "type": { "array": ["u8", { "generic": "N" }] } }]
+      }
     }
   ]
 }"#,
@@ -1898,6 +2168,42 @@ pub struct Close {
 }
 
 #[test]
+fn close_destination_must_be_mutable() {
+    CompileCase::new(
+        "close_destination_must_be_mutable",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[account]
+pub struct Data {
+    pub value: u64,
+}
+
+#[program]
+pub mod close_destination_must_be_mutable {
+    use super::*;
+
+    #[discrim = 0]
+    pub fn close(ctx: &mut Context<Close>) -> Result<()> {
+        let _ = ctx;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Close {
+    #[account(mut, close = receiver)]
+    pub data: Account<Data>,
+    pub receiver: SystemAccount,
+}
+"#,
+    )
+    .expect_fail(&["the destination specified for a close constraint must be mutable"]);
+}
+
+#[test]
 fn account_attrs_on_nested_field_do_not_compile() {
     CompileCase::new(
         "account_attrs_on_nested_field",
@@ -2100,6 +2406,117 @@ const _: usize = Slab::<GoodHeader, ()>::space_for(0);
     )
     .build()
     .expect_fail(&["Slab tail item type must be non-zero-sized"]);
+}
+
+#[test]
+fn podvec_oversized_max_default_does_not_compile() {
+    CompileCase::new(
+        "podvec_oversized_max_default",
+        r#"
+use anchor_lang::pod::{PodU8, PodVec};
+
+// Public item so the lib target monomorphizes Default (private fns may be skipped).
+pub fn force_default() {
+    let _ = PodVec::<PodU8, 70000>::default();
+}
+"#,
+    )
+    .build()
+    .expect_fail(&["MAX must be <= 65_535"]);
+}
+
+#[test]
+fn podvec_oversized_max_capacity_does_not_compile() {
+    CompileCase::new(
+        "podvec_oversized_max_capacity",
+        r#"
+use anchor_lang::pod::{PodU8, PodVec};
+
+// Evaluating CAPACITY forces the MAX <= u16::MAX assert.
+const _: usize = PodVec::<PodU8, 70000>::CAPACITY;
+"#,
+    )
+    .build()
+    .expect_fail(&["MAX must be <= 65_535"]);
+}
+
+#[test]
+fn podvec_oversized_max_account_field_does_not_compile() {
+    CompileCase::new(
+        "podvec_oversized_max_account_field",
+        r#"
+use anchor_lang::prelude::*;
+use anchor_lang::pod::{PodU8, PodVec};
+
+declare_id!("11111111111111111111111111111111");
+
+#[account]
+pub struct Oversized {
+    pub items: PodVec<PodU8, 70000>,
+}
+"#,
+    )
+    .expect_fail(&["MAX must be <= 65_535"]);
+}
+
+#[test]
+fn podvec_oversized_max_const_account_field_does_not_compile() {
+    let source = r#"
+use anchor_lang::prelude::*;
+use anchor_lang::pod::{PodU64, PodVec};
+
+declare_id!("11111111111111111111111111111111");
+
+pub const MAX_VALIDATORS: usize = 70000;
+
+pub struct Limits;
+impl Limits {
+    pub const MAX: usize = MAX_VALIDATORS;
+}
+
+#[account]
+#[repr(C)]
+pub struct ValidatorRegistry {
+    pub count: PodU64,
+    pub validators: PodVec<PodU64, CAPACITY_EXPR>,
+}
+"#;
+
+    for (name, capacity) in [
+        ("podvec_account_named_const", "MAX_VALIDATORS"),
+        ("podvec_account_const_expr", "{ u16::MAX as usize + 1 }"),
+        ("podvec_account_associated_const", "{ Limits::MAX }"),
+    ] {
+        CompileCase::new(name, &source.replace("CAPACITY_EXPR", capacity))
+            .expect_fail(&["MAX must be <= 65_535"]);
+    }
+}
+
+#[test]
+fn podvec_max_u16_const_account_field_compiles() {
+    CompileCase::new(
+        "podvec_max_u16_const_account_field",
+        r#"
+use anchor_lang::prelude::*;
+use anchor_lang::pod::{PodU64, PodVec};
+
+declare_id!("11111111111111111111111111111111");
+
+pub const MAX_VALIDATORS: usize = u16::MAX as usize;
+
+#[account]
+pub struct ValidatorRegistry {
+    pub count: PodU64,
+    pub validators: PodVec<PodU64, MAX_VALIDATORS>,
+    pub empty: anchor_lang::pod::PodVec<PodU64, 0>,
+    #[cfg(any())]
+    pub disabled: PodVec<PodU64, { u16::MAX as usize + 1 }>,
+    #[cfg(any())]
+    pub also_disabled: PodVec<PodU64, UNKNOWN_CAPACITY>,
+}
+"#,
+    )
+    .expect_pass();
 }
 
 #[test]

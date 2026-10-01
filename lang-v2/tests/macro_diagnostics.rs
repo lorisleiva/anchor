@@ -93,6 +93,100 @@ fn compile_pass_case(name: &str, source: &str) {
     );
 }
 
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn btree_map_instruction_arguments_remain_supported() {
+    compile_pass_case(
+        "btree_map_instruction_arguments",
+        r#"
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[derive(Accounts)]
+pub struct Noop {}
+
+#[program]
+pub mod btree_map_instruction_arg {
+    use super::*;
+
+    pub fn set(_ctx: &mut Context<Noop>, value: BTreeMap<u8, u16>) -> Result<()> {
+        let _ = value;
+        Ok(())
+    }
+}
+"#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn btree_set_tuple_and_idl_type_arguments_remain_supported() {
+    cargo_test_pass_case(
+        "btree_set_tuple_and_idl_type_arguments",
+        r#"
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd, AnchorDeserialize, AnchorSerialize, IdlType)]
+pub struct NestedArgs {
+    pub value: u64,
+}
+
+#[derive(AnchorDeserialize, AnchorSerialize, IdlType)]
+pub struct CollectionArgs {
+    pub values: BTreeSet<NestedArgs>,
+    pub pair: (NestedArgs, u16),
+}
+
+#[derive(Accounts)]
+pub struct Noop {}
+
+#[program]
+pub mod btree_set_tuple_and_idl_type_args {
+    use super::*;
+
+    pub fn set(
+        _ctx: &mut Context<Noop>,
+        values: BTreeSet<NestedArgs>,
+        pair: (u8, u16),
+        args: CollectionArgs,
+    ) -> Result<()> {
+        let _ = (values, pair, args);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "idl-build")]
+#[test]
+fn nested_dependencies_are_forwarded() {
+    let type_def = <CollectionArgs as IdlAccountType>::__idl_type_def().unwrap();
+    assert!(type_def.contains("\"name\":\"BTreeSet\""));
+    assert!(type_def.contains("\"name\":\"(NestedArgs,u16)\""));
+
+    let mut accounts = alloc::vec::Vec::new();
+    let mut types = alloc::vec::Vec::new();
+    <CollectionArgs as IdlAccountType>::__register_idl_deps(&mut accounts, &mut types);
+    assert!(types.iter().any(|ty| ty.contains("\"name\":\"NestedArgs\"")));
+}
+"#,
+        &["idl-build"],
+    );
+}
+
 fn cargo_test_pass_case(name: &str, source: &str, features: &[&str]) {
     let mut args = Vec::new();
     if !features.is_empty() {
@@ -403,6 +497,98 @@ mod shim {
     miri,
     ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
 )]
+fn account_borsh_rejects_cfg_gated_wincode_skip() {
+    compile_fail_case(
+        "account_borsh_cfg_gated_wincode_skip",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[account(borsh)]
+pub struct Bad {
+    #[cfg(feature = "extra")]
+    #[wincode(skip)]
+    pub skipped: u64,
+    pub kept: u8,
+}
+"#,
+        &[
+            "`#[account(borsh)]` does not support `#[wincode(skip)]` fields",
+            "generated IDL would not match the serialized wire layout",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn event_rejects_cfg_gated_wincode_skip() {
+    compile_fail_case(
+        "event_cfg_gated_wincode_skip",
+        r#"
+use anchor_lang::prelude::*;
+
+#[event]
+pub struct Bad {
+    #[cfg(feature = "extra")]
+    #[wincode(skip)]
+    pub skipped: u64,
+    pub kept: u8,
+}
+"#,
+        &[
+            "`#[event]` does not support `#[wincode(skip)]` fields",
+            "generated IDL would not match the serialized wire layout",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn idl_generation_rejects_wincode_enum_tag_override() {
+    compile_fail_case(
+        "idl_type_wincode_tag_encoding",
+        r#"
+use anchor_lang::{AnchorDeserialize, AnchorSerialize, IdlType};
+
+#[derive(IdlType, AnchorDeserialize, AnchorSerialize)]
+#[wincode(tag_encoding = "u32")]
+pub enum Bad {
+    A,
+    B(u16),
+}
+"#,
+        &[
+            "`#[derive(IdlType)]` does not support `#[wincode(tag_encoding = ...)]`",
+            "1-byte enum discriminant",
+        ],
+    );
+
+    compile_pass_case(
+        "idl_type_default_enum",
+        r#"
+use anchor_lang::{AnchorDeserialize, AnchorSerialize, IdlType};
+
+#[derive(IdlType, AnchorDeserialize, AnchorSerialize)]
+pub enum DefaultTag {
+    A,
+    B(u16),
+}
+"#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
 fn idl_generation_rejects_lossy_packed_repr_modifiers() {
     compile_fail_case(
         "event_bytemuck_packed_two",
@@ -472,6 +658,41 @@ pub enum MyError {
         &[
             "unknown `#[error_code]` argument `unknown`",
             "expected `offset = N`",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn malformed_error_code_msg_is_rejected() {
+    compile_fail_case(
+        "malformed_error_code_msg",
+        r#"
+use anchor_lang::prelude::*;
+
+#[error_code]
+pub enum BadMsg {
+    #[msg = "oops"]
+    NameValue,
+    #[msg]
+    Path,
+    #[msg("a", "b")]
+    Multi,
+    #[msg(SOME_CONST)]
+    Ident,
+    #[msg(1)]
+    Int,
+    #[msg("a")]
+    #[msg("b")]
+    Duplicate,
+}
+"#,
+        &[
+            r#"expected `#[msg("...")]`"#,
+            "duplicate `#[msg]` attribute",
         ],
     );
 }
@@ -611,8 +832,8 @@ pub struct Outer {
     miri,
     ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
 )]
-fn floats_are_rejected_on_borsh_compatible_surfaces() {
-    compile_fail_case(
+fn floats_are_allowed_on_borsh_compatible_surfaces() {
+    compile_pass_case(
         "float_instruction_arg",
         r#"
 use anchor_lang::prelude::*;
@@ -632,13 +853,41 @@ pub mod float_instruction_arg {
 #[derive(Accounts)]
 pub struct Noop {}
 "#,
-        &[
-            "`f32` and `f64` instruction arguments are not supported",
-            "use an integer or fixed-point representation",
-        ],
     );
 
-    compile_fail_case(
+    compile_pass_case(
+        "float_instruction_attr_arg",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[derive(Accounts)]
+#[instruction(price: f64)]
+pub struct SetPrice {
+    pub data: UncheckedAccount,
+}
+"#,
+    );
+
+    compile_pass_case(
+        "float_instruction_attr_alias",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+type Price = f64;
+
+#[derive(Accounts)]
+#[instruction(price: Price)]
+pub struct SetPrice {
+    pub data: UncheckedAccount,
+}
+"#,
+    );
+
+    compile_pass_case(
         "float_borsh_account",
         r#"
 use anchor_lang::prelude::*;
@@ -650,13 +899,9 @@ pub struct Price {
     pub value: Option<f32>,
 }
 "#,
-        &[
-            "`f32` and `f64` are not supported on `#[account(borsh)]`",
-            "use an integer or fixed-point representation",
-        ],
     );
 
-    compile_fail_case(
+    compile_pass_case(
         "float_event",
         r#"
 use anchor_lang::prelude::*;
@@ -666,13 +911,9 @@ pub struct PriceChanged {
     pub value: f64,
 }
 "#,
-        &[
-            "`f32` and `f64` are not supported on `#[event]`",
-            "use an integer or fixed-point representation",
-        ],
     );
 
-    compile_fail_case(
+    compile_pass_case(
         "float_idl_type",
         r#"
 use anchor_lang::prelude::*;
@@ -682,10 +923,114 @@ pub struct Price {
     pub value: Vec<f64>,
 }
 "#,
-        &[
-            "`f32` and `f64` are not supported on `#[derive(IdlType)]`",
-            "use an integer or fixed-point representation",
-        ],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn declared_program_accepts_external_float_instruction_types() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let idl_path = manifest_dir.join("target/idls/external_float.json");
+    fs::create_dir_all(idl_path.parent().unwrap()).unwrap();
+    fs::write(
+        &idl_path,
+        r#"{
+  "address": "11111111111111111111111111111111",
+  "metadata": {
+    "name": "external_float",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "useExternal",
+      "discriminator": [1, 2, 3, 4],
+      "accounts": [],
+      "args": [
+        {
+          "name": "value",
+          "type": { "defined": { "name": "ExternalFloat" } }
+        }
+      ]
+    }
+  ],
+  "types": []
+}"#,
+    )
+    .unwrap();
+
+    let output = cargo_case(
+        "declared_program_external_float",
+        r#"
+use anchor_lang::prelude::*;
+
+mod external_types {
+    pub type ExternalFloat = f64;
+}
+
+use external_types::ExternalFloat;
+
+declare_program!(external_float);
+"#,
+        "check",
+        &[],
+    );
+    fs::remove_file(idl_path).unwrap();
+
+    assert!(
+        output.status.success(),
+        "declared program with an external float type failed to compile:\n\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn nested_float_aliases_are_allowed_on_borsh_accounts() {
+    compile_pass_case(
+        "nested_safe_borsh_account",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct SafeInner {
+    pub value: u64,
+}
+
+#[account(borsh)]
+pub struct SafeAccount {
+    pub value: SafeInner,
+}
+"#,
+    );
+
+    compile_pass_case(
+        "nested_float_alias_borsh_account",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+type FloatAlias = f64;
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct HiddenFloat {
+    pub value: FloatAlias,
+}
+
+#[account(borsh)]
+pub struct Price {
+    pub value: HiddenFloat,
+}
+"#,
     );
 }
 
@@ -715,6 +1060,46 @@ pub mod gated_program {
 #[derive(Accounts)]
 pub struct Noop {}
 "#,
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn cfg_gated_discriminator_validation() {
+    compile_fail_case(
+        "cfg_gated_discriminator_collision",
+        r#"
+use anchor_lang::prelude::*;
+
+declare_id!("11111111111111111111111111111111");
+
+#[program]
+pub mod collision_program {
+    use super::*;
+
+    #[cfg(unix)]
+    pub fn protected(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[discrim = 214]
+    pub fn decoy(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(any())]
+    pub fn disabled(_ctx: &mut Context<Noop>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Noop {}
+"#,
+        &["instruction `protected` is missing `#[discrim = N]`"],
     );
 }
 
@@ -1364,6 +1749,28 @@ pub struct Bad {
     miri,
     ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
 )]
+fn associated_token_update_constraints_are_rejected() {
+    compile_fail_case(
+        "associated_token_update_constraints_are_rejected",
+        r#"
+use anchor_lang::prelude::*;
+
+#[derive(Accounts)]
+pub struct Bad {
+    #[account(update(associated_token::mint = mint))]
+    pub data: UncheckedAccount,
+    pub mint: UncheckedAccount,
+}
+"#,
+        &["`update(associated_token::...)` constraints are not supported"],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
 fn optional_pda_init_payer_is_rejected() {
     compile_fail_case(
         "optional_pda_init_payer_is_rejected",
@@ -1577,5 +1984,36 @@ declare_id!("11111111111111111111111111111111");
 pub struct BorshTupleData(pub u64, pub u32);
 "#,
         &["`#[account]` only supports structs with named fields"],
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns cargo and writes temporary workspaces; covered by normal cargo test"
+)]
+fn event_name_override_binds_wire_and_idl_identity() {
+    cargo_test_pass_case(
+        "event_name_override",
+        r#"
+use anchor_lang::prelude::*;
+
+#[event(name = "ReceiptV1")]
+pub struct Receipt { pub amount: u64 }
+
+#[cfg(all(test, feature = "idl-build"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_changes_wire_and_idl_identity() {
+        assert_eq!(Receipt::DISCRIMINATOR, [40, 147, 163, 222, 187, 159, 205, 141]);
+        assert!(<Receipt as IdlAccountType>::__idl_type_def()
+            .unwrap()
+            .contains("ReceiptV1"));
+    }
+}
+"#,
+        &["idl-build"],
     );
 }

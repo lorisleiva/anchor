@@ -12,7 +12,6 @@ export default {
     nodeResolve({
       browser: true,
       extensions: [".js", ".ts"],
-      dedupe: ["bn.js", "buffer"],
       preferBuiltins: false,
     }),
     typescript({
@@ -33,14 +32,10 @@ export default {
   ],
   external: [
     "@solana/kit",
-    "@solana/web3.js",
-    "bn.js",
-    "bs58",
-    "buffer",
+    "@solana-program/system",
+    "@solana-program/program-metadata",
+    "@solana-program/token",
     "camelcase",
-    "eventemitter3",
-    "@noble/hashes/sha256",
-    "pako",
     "toml",
   ],
   output: {

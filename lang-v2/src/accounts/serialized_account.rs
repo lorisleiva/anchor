@@ -330,6 +330,18 @@ where
     S: AnchorAccountSerialize<T>,
 {
     fn close(&mut self, mut destination: AccountView) -> pinocchio::ProgramResult {
+        // Guardrail: catches "forgot `#[account(mut)]`" on the close
+        // destination early with a clear error.
+        #[cfg(feature = "guardrails")]
+        if !destination.is_writable() {
+            return Err(super::slab::cold_not_writable());
+        }
+        // Guardrail: self-close would credit the lamports and then zero them on
+        // the same account, burning them.
+        #[cfg(feature = "guardrails")]
+        if pinocchio::address::address_eq(destination.address(), self.view.address()) {
+            return Err(super::slab::cold_self_close());
+        }
         self.assert_mutable_loaded();
         let mut self_view = self.view;
         let dest_lamports = destination
@@ -436,6 +448,20 @@ where
 {
     fn as_ref(&self) -> &AccountView {
         &self.view
+    }
+}
+
+impl<T, S> crate::LamportsMutable for SerializedAccount<T, S>
+where
+    T: Owner + Discriminator,
+    S: AnchorAccountSerialize<T>,
+{
+    #[inline(always)]
+    fn try_assert_lamports_mutable(&self) -> Result<(), ProgramError> {
+        if !self.is_mutable {
+            return Err(crate::ErrorCode::ConstraintMut.into());
+        }
+        Ok(())
     }
 }
 
